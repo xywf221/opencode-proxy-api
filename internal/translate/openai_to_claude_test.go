@@ -208,17 +208,49 @@ func TestTranslateChunk(t *testing.T) {
 			}},
 		}
 		events := translateChunk(state, chunk)
-		if !state.stopSent {
-			t.Error("stop should be sent")
+		if state.stopSent {
+			t.Error("stop should wait for usage chunk or DONE")
 		}
-		hasStop := false
+		if state.pendingFinishReason == nil || *state.pendingFinishReason != "stop" {
+			t.Errorf("pending finish reason = %v", state.pendingFinishReason)
+		}
 		for _, e := range events {
 			if e["type"] == "message_stop" {
-				hasStop = true
+				t.Errorf("message_stop should be deferred, got events: %v", events)
 			}
 		}
-		if !hasStop {
-			t.Errorf("expected message_stop, got events: %v", events)
+	})
+
+	t.Run("usage_chunk_after_finish", func(t *testing.T) {
+		state := newClaudeState()
+		state.messageStartSent = true
+		stop := "stop"
+		translateChunk(state, &OpenAIStreamChunk{
+			Choices: []OpenAIChoice{{
+				Delta:        OpenAIChunkDelta{},
+				FinishReason: &stop,
+			}},
+		})
+
+		events := translateChunk(state, &OpenAIStreamChunk{
+			Usage: &OpenAIUsage{PromptTokens: 10, CompletionTokens: 5},
+		})
+		if !state.stopSent {
+			t.Error("stop should be sent after usage chunk")
+		}
+
+		hasUsage := false
+		for _, e := range events {
+			if e["type"] == "message_delta" {
+				u := e["usage"].(map[string]interface{})
+				if u["output_tokens"] != 5 {
+					t.Errorf("output_tokens = %v", u["output_tokens"])
+				}
+				hasUsage = true
+			}
+		}
+		if !hasUsage {
+			t.Errorf("expected usage in message_delta, got events: %v", events)
 		}
 	})
 

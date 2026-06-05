@@ -22,16 +22,17 @@ type ClaudeMessage struct {
 }
 
 type ContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Source    *ImageSource    `json:"source,omitempty"`
-	Thinking  string          `json:"thinking,omitempty"`
-	Signature string          `json:"signature,omitempty"`
+	Type       string          `json:"type"`
+	Text       string          `json:"text,omitempty"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	ToolUseID  string          `json:"tool_use_id,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Source     *ImageSource    `json:"source,omitempty"`
+	Thinking   string          `json:"thinking,omitempty"`
+	Signature  string          `json:"signature,omitempty"`
 }
 
 type ImageSource struct {
@@ -48,14 +49,19 @@ type ClaudeTool struct {
 }
 
 type OpenAIChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	Stream      bool            `json:"stream,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	Stop        interface{}     `json:"stop,omitempty"`
+	Model         string               `json:"model"`
+	Messages      []OpenAIMessage      `json:"messages"`
+	Stream        bool                 `json:"stream,omitempty"`
+	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	MaxTokens     int                  `json:"max_tokens,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	Tools         []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage      `json:"tool_choice,omitempty"`
+	Stop          interface{}          `json:"stop,omitempty"`
+}
+
+type OpenAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type OpenAIMessage struct {
@@ -108,6 +114,9 @@ func ClaudeToOpenAI(body []byte) []byte {
 		Stream:      cr.Stream,
 		MaxTokens:   cr.MaxTokens,
 		Temperature: cr.Temperature,
+	}
+	if cr.Stream {
+		result.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}
 	}
 
 	// System message
@@ -266,11 +275,16 @@ func convertClaudeMessage(msg ClaudeMessage) []OpenAIMessage {
 
 		case "tool_result":
 			content := extractToolResultContent(block)
-			toolResults = append(toolResults, OpenAIMessage{
-				Role:       "tool",
-				ToolCallID: block.ToolUseID,
-				Content:    content,
-			})
+			toolCallID := extractToolResultID(block)
+			if toolCallID != "" {
+				toolResults = append(toolResults, OpenAIMessage{
+					Role:       "tool",
+					ToolCallID: toolCallID,
+					Content:    content,
+				})
+			} else {
+				parts = append(parts, ContentPart{Type: "text", Text: content})
+			}
 		}
 	}
 
@@ -304,6 +318,16 @@ func convertClaudeMessage(msg ClaudeMessage) []OpenAIMessage {
 	}
 
 	return nil
+}
+
+func extractToolResultID(b ContentBlock) string {
+	if b.ToolUseID != "" {
+		return b.ToolUseID
+	}
+	if b.ToolCallID != "" {
+		return b.ToolCallID
+	}
+	return b.ID
 }
 
 func joinParts(parts []ContentPart) interface{} {

@@ -292,9 +292,21 @@ func TestNonStreamingPassthrough(t *testing.T) {
 
 func TestClaudeStreaming(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var upstreamReq struct {
+			StreamOptions *struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamReq); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		if upstreamReq.StreamOptions == nil || !upstreamReq.StreamOptions.IncludeUsage {
+			t.Errorf("stream_options.include_usage should be true: %+v", upstreamReq.StreamOptions)
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -321,6 +333,9 @@ func TestClaudeStreaming(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "event: message_stop") {
 		t.Error("expected Claude message_stop event")
+	}
+	if !strings.Contains(bodyStr, `"output_tokens":5`) {
+		t.Errorf("expected output_tokens in Claude stream, got: %s", bodyStr)
 	}
 }
 

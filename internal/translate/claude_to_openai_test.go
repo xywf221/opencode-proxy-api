@@ -121,6 +121,20 @@ func TestConvertClaudeMessage(t *testing.T) {
 		t.Errorf("tool_result: got %+v", got)
 	}
 
+	// Tool result with OpenAI-style tool_call_id alias
+	msg = ClaudeMessage{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_call_id":"call_1","content":"done"}]`)}
+	got = convertClaudeMessage(msg)
+	if len(got) != 1 || got[0].Role != "tool" || got[0].ToolCallID != "call_1" {
+		t.Errorf("tool_result alias: got %+v", got)
+	}
+
+	// Tool result without an ID should not produce an invalid OpenAI tool message
+	msg = ClaudeMessage{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","content":"done"}]`)}
+	got = convertClaudeMessage(msg)
+	if len(got) != 1 || got[0].Role == "tool" || got[0].Content != "done" {
+		t.Errorf("tool_result missing id: got %+v", got)
+	}
+
 	// Tool use → tool_calls
 	msg = ClaudeMessage{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_1","name":"get_weather","input":{"city":"NYC"}}]`)}
 	got = convertClaudeMessage(msg)
@@ -187,6 +201,16 @@ func TestClaudeToOpenAI(t *testing.T) {
 	}
 	if len(result.Messages) != 1 || result.Messages[0].Role != "user" || result.Messages[0].Content != "hello" {
 		t.Errorf("messages: got %+v", result.Messages)
+	}
+
+	// Streaming requests should ask upstream to include usage chunks
+	input = `{"model":"deepseek-v4","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+	output = ClaudeToOpenAI([]byte(input))
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.StreamOptions == nil || !result.StreamOptions.IncludeUsage {
+		t.Errorf("stream_options.include_usage should be true: got %+v", result.StreamOptions)
 	}
 
 	// System message as string

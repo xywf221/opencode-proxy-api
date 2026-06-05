@@ -70,7 +70,9 @@ type claudeStreamState struct {
 	toolCalls   map[int]toolCallInfo
 	toolArgBufs map[int]string
 
-	stopSent bool
+	pendingFinishReason *string
+	usage               *OpenAIUsage
+	stopSent            bool
 }
 
 type toolCallInfo struct {
@@ -121,7 +123,7 @@ func OpenAIStreamToClaudeStream(ctx context.Context, openaiBody io.ReadCloser) i
 			data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 			if data == "[DONE]" {
 				if state.messageStartSent && !state.stopSent {
-					events := buildStopEvents(state, nil, nil)
+					events := buildStopEvents(state, state.pendingFinishReason, state.usage)
 					for _, e := range events {
 						writeClaudeEvent(pw, e)
 					}
@@ -157,6 +159,13 @@ func OpenAIStreamToClaudeStream(ctx context.Context, openaiBody io.ReadCloser) i
 
 func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []ClaudeSSEEvent {
 	var events []ClaudeSSEEvent
+
+	if chunk.Usage != nil {
+		state.usage = chunk.Usage
+		if state.messageStartSent && state.pendingFinishReason != nil && !state.stopSent {
+			return buildStopEvents(state, state.pendingFinishReason, state.usage)
+		}
+	}
 
 	if len(chunk.Choices) == 0 {
 		return nil
@@ -313,7 +322,11 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 
 	// ── finish_reason ──
 	if choice.FinishReason != nil && *choice.FinishReason != "" && !state.stopSent {
-		events = append(events, buildStopEvents(state, choice.FinishReason, chunk.Usage)...)
+		finishReason := *choice.FinishReason
+		state.pendingFinishReason = &finishReason
+		if chunk.Usage != nil {
+			events = append(events, buildStopEvents(state, state.pendingFinishReason, chunk.Usage)...)
+		}
 	}
 
 	return events
