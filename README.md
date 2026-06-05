@@ -1,6 +1,6 @@
 # opencode-proxy-api
 
-[![CI](https://github.com/dongm/opencode-proxy-api/actions/workflows/ci.yml/badge.svg)](https://github.com/dongm/opencode-proxy-api/actions/workflows/ci.yml)
+[![CI](https://github.com/xywf221/opencode-proxy-api/actions/workflows/ci.yml/badge.svg)](https://github.com/xywf221/opencode-proxy-api/actions/workflows/ci.yml)
 
 A lightweight Go proxy for [opencode.ai](https://opencode.ai) that exposes all three API formats — OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages — through a single endpoint.
 
