@@ -64,7 +64,7 @@ jobs:
           GOOS: ${{ fromJSON('{"linux-amd64":"linux","linux-arm64":"linux","windows-amd64":"windows","darwin-amd64":"darwin","darwin-arm64":"darwin"}')[matrix.target] }}
           GOARCH: ${{ fromJSON('{"linux-amd64":"amd64","linux-arm64":"arm64","windows-amd64":"amd64","darwin-amd64":"amd64","darwin-arm64":"arm64"}')[matrix.target] }}
         run: go build -o "dist/opencode-proxy-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}" ./cmd/server
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: opencode-proxy-${{ matrix.target }}
           path: dist/opencode-proxy-${{ matrix.target }}*
