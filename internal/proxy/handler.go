@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"strings"
 
-	"opencode-proxy-api/config"
-	"opencode-proxy-api/internal/reasoning"
-	"opencode-proxy-api/internal/translate"
+	"github.com/xywf221/opencode-proxy-api/config"
+	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
+	"github.com/xywf221/opencode-proxy-api/internal/translate"
 )
 
 type endpointConfig struct {

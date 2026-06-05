@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-proxy-api/config"
+	"github.com/xywf221/opencode-proxy-api/config"
 )
 
 func newTestConfig(opts ...func(*config.Config)) *config.Config {

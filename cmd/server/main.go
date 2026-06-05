@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"opencode-proxy-api/config"
-	"opencode-proxy-api/internal/proxy"
+	"github.com/xywf221/opencode-proxy-api/config"
+	"github.com/xywf221/opencode-proxy-api/internal/proxy"
 )
 
 func loadEnvFile() {
