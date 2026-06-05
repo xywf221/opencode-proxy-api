@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/xywf221/opencode-proxy-api/config"
 	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
@@ -126,6 +127,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log = log.With("model", model, "stream", isStream, "endpoint", r.URL.Path)
 	log.Debug("processing request")
 
+	start := time.Now()
+
 	forwardBody := bodyBytes
 	if ep.isClaude {
 		forwardBody = translate.ClaudeBodyToOpenAI(bodyBytes)
@@ -154,7 +157,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	log.Debug("upstream response", "status", resp.StatusCode)
+	elapsed := time.Since(start)
 
 	if ep.isClaude {
 		if resp.StatusCode != http.StatusOK {
@@ -164,6 +167,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if isStream {
+			log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
@@ -175,6 +179,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			out, _ := io.ReadAll(resp.Body)
+			prompt, comp := extractUsage(out)
+			log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 			claudeResp := translate.OpenAIResponseToClaudeResponse(out)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
@@ -189,6 +195,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	if isStream {
+		log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 		if w.Header().Get("Content-Type") == "" {
 			w.Header().Set("Content-Type", "text/event-stream")
 		}
@@ -197,6 +204,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		out, _ := io.ReadAll(resp.Body)
+		prompt, comp := extractUsage(out)
+		log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 		if _, err := w.Write(out); err != nil {
 			log.Debug("response write error", "error", err)
 		}
@@ -265,6 +274,20 @@ func tryInjectReasoning(model string, body []byte) []byte {
 		return body
 	}
 	return modifiedBytes
+}
+
+// extractUsage attempts to parse token usage from an OpenAI response body.
+func extractUsage(body []byte) (prompt, completion int) {
+	var v struct {
+		Usage *struct {
+			Prompt     int `json:"prompt_tokens"`
+			Completion int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &v) == nil && v.Usage != nil {
+		return v.Usage.Prompt, v.Usage.Completion
+	}
+	return 0, 0
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -59,7 +59,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 
 		if r.URL.Path != "/health" {
-			slog.Info("request",
+			slog.Debug("request",
 				"req_id", reqID,
 				"method", r.Method,
 				"path", r.URL.Path,
