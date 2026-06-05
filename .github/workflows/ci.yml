@@ -16,40 +16,9 @@ jobs:
         with:
           go-version: '1.22'
           cache: true
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-      - name: Build
-        run: go build ./...
-
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-      - name: Test
-        run: go test -race -count=1 ./...
 
   vet:
     name: Vet
@@ -60,5 +29,42 @@ jobs:
         with:
           go-version: '1.22'
           cache: true
-      - name: Vet
-        run: go vet ./...
+      - run: go vet ./...
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - run: go test -race -count=1 ./...
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - linux-amd64
+          - linux-arm64
+          - windows-amd64
+          - darwin-amd64
+          - darwin-arm64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - name: Cross-compile
+        env:
+          GOOS: ${{ fromJSON('{"linux-amd64":"linux","linux-arm64":"linux","windows-amd64":"windows","darwin-amd64":"darwin","darwin-arm64":"darwin"}')[matrix.target] }}
+          GOARCH: ${{ fromJSON('{"linux-amd64":"amd64","linux-arm64":"arm64","windows-amd64":"amd64","darwin-amd64":"amd64","darwin-arm64":"arm64"}')[matrix.target] }}
+        run: go build -o "dist/opencode-proxy-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}" ./cmd/server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-proxy-${{ matrix.target }}
+          path: dist/opencode-proxy-${{ matrix.target }}*
