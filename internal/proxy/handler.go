@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -54,30 +55,46 @@ func New(cfg *config.Config) *Handler {
 // reqLog builds a component+request-id logger from context.
 func reqLog(ctx context.Context) *slog.Logger {
 	l := slog.With("component", "proxy")
-	if ctx != nil {
-		if id, ok := ctx.Value(contextKey("request_id")).(string); ok && id != "" {
-			l = l.With("req_id", id)
-		}
+	if id := GetRequestID(ctx); id != "" {
+		l = l.With("req_id", id)
 	}
 	return l
 }
 
-type contextKey string
+// Package-level context key types for request ID propagation.
+type ctxKey string
+
+const reqIDKey ctxKey = "request_id"
+
+// WithRequestID returns a context with the request ID attached.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, reqIDKey, id)
+}
+
+// GetRequestID extracts the request ID from context, if any.
+func GetRequestID(ctx context.Context) string {
+	if id, ok := ctx.Value(reqIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := reqLog(r.Context())
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Error("panic recovered", "panic", rec)
+			log.Error("panic recovered", "panic", rec, "stack", string(debug.Stack()))
 			writeJSONError(w, http.StatusInternalServerError, "internal server error", "server_error")
 		}
 	}()
 
+	// Set CORS headers on all responses
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version")
+
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -136,7 +153,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		forwardBody = tryInjectReasoning(model, bodyBytes)
 	}
 
-	upstreamURL := h.cfg.UpstreamBase + ep.upstreamPath
+	baseURL := strings.TrimRight(h.cfg.UpstreamBase, "/")
+	upstreamURL := baseURL + ep.upstreamPath
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
@@ -152,7 +170,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.upstream.Do(upstreamReq)
 	if err != nil {
 		log.Error("upstream request failed", "error", err, "upstream", upstreamURL)
-		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("upstream error: %v", err), "server_error")
+		writeJSONError(w, http.StatusBadGateway, "upstream request failed", "server_error")
 		return
 	}
 	defer resp.Body.Close()
@@ -161,7 +179,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if ep.isClaude {
 		if resp.StatusCode != http.StatusOK {
-			out, _ := io.ReadAll(resp.Body)
+			out, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBodySize))
 			log.Warn("upstream non-200 for claude endpoint", "status", resp.StatusCode)
 			writeJSON(w, resp.StatusCode, translate.OpenAIErrorToClaudeError(out))
 			return
@@ -172,13 +190,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			w.WriteHeader(resp.StatusCode)
-			claudeStream := translate.OpenAIStreamToClaudeStream(resp.Body)
+			claudeStream := translate.OpenAIStreamToClaudeStream(r.Context(), resp.Body)
 			defer claudeStream.Close()
 			if _, err := io.Copy(w, claudeStream); err != nil {
 				log.Debug("response write error", "error", err)
 			}
 		} else {
-			out, _ := io.ReadAll(resp.Body)
+			out, err := readUpstreamBody(resp.Body)
+			if err != nil {
+				log.Error("failed to read upstream response", "error", err)
+				writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
+				return
+			}
 			prompt, comp := extractUsage(out)
 			log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 			claudeResp := translate.OpenAIResponseToClaudeResponse(out)
@@ -203,7 +226,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Debug("response write error", "error", err)
 		}
 	} else {
-		out, _ := io.ReadAll(resp.Body)
+		out, err := readUpstreamBody(resp.Body)
+		if err != nil {
+			log.Error("failed to read upstream response", "error", err)
+			writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
+			return
+		}
 		prompt, comp := extractUsage(out)
 		log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 		if _, err := w.Write(out); err != nil {
@@ -274,6 +302,21 @@ func tryInjectReasoning(model string, body []byte) []byte {
 		return body
 	}
 	return modifiedBytes
+}
+
+const maxUpstreamBodySize = 50 << 20 // 50 MB
+
+// readUpstreamBody reads the upstream response body, limiting to maxUpstreamBodySize.
+func readUpstreamBody(body io.ReadCloser) ([]byte, error) {
+	limited := io.LimitReader(body, maxUpstreamBodySize+1)
+	out, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(out)) > maxUpstreamBodySize {
+		return nil, fmt.Errorf("upstream response exceeds %d bytes", maxUpstreamBodySize)
+	}
+	return out, nil
 }
 
 // extractUsage attempts to parse token usage from an OpenAI response body.

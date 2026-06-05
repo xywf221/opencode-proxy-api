@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -59,6 +60,8 @@ func Load() *Config {
 	if timeoutStr != "" {
 		if d, err := time.ParseDuration(timeoutStr); err == nil {
 			timeout = d
+		} else {
+			slog.With("component", "config").Warn("invalid OPCODE_UPSTREAM_TIMEOUT, using default", "value", timeoutStr, "default", timeout)
 		}
 	}
 

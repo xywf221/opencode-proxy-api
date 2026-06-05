@@ -3,11 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
-	"expvar"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -36,6 +34,10 @@ func loadEnvFile() {
 		}
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
+		// Strip surrounding quotes
+		if len(val) > 1 && (val[0] == '"' || val[0] == '\'') && val[0] == val[len(val)-1] {
+			val = val[1 : len(val)-1]
+		}
 		if os.Getenv(key) == "" {
 			os.Setenv(key, val)
 		}
@@ -49,7 +51,7 @@ func loadEnvFile() {
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqID := fmt.Sprintf("req_%d", time.Now().UnixNano())
-		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
+		ctx := proxy.WithRequestID(r.Context(), reqID)
 		r = r.WithContext(ctx)
 		w.Header().Set("X-Request-Id", reqID)
 
@@ -109,22 +111,10 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
-	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
-
 	mux.Handle("/v1/chat/completions", h)
 	mux.Handle("/v1/messages", h)
 	mux.Handle("/v1/responses", h)
 	mux.Handle("/v1/models", h)
-
-	mux.Handle("/debug/vars", expvar.Handler())
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -169,17 +159,4 @@ func main() {
 		log.Error("server error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// type for context keys
-type contextKey string
-
-const requestIDKey contextKey = "request_id"
-
-// RequestIDFromContext extracts the request ID from context (used by proxy).
-func RequestIDFromContext(ctx context.Context) string {
-	if id, ok := ctx.Value(requestIDKey).(string); ok {
-		return id
-	}
-	return ""
 }

@@ -7,15 +7,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xywf221/opencode-proxy-api/config"
 )
 
 func newTestConfig(opts ...func(*config.Config)) *config.Config {
-	cfg := config.Load()
-	// Override defaults for test
-	cfg.UpstreamBase = ""
-	cfg.UpstreamToken = "public"
+	cfg := &config.Config{
+		ListenAddr:      ":8080",
+		UpstreamBase:    "",
+		UpstreamToken:   "public",
+		UpstreamTimeout: 5 * time.Minute,
+	}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -35,9 +38,6 @@ func withAllowedModels(models ...string) func(*config.Config) {
 		c.AllowedModels = m
 	}
 }
-
-// Test CORS
-
 func TestCORSPreflight(t *testing.T) {
 	h := New(newTestConfig())
 	rec := httptest.NewRecorder()

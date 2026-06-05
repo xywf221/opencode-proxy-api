@@ -2,6 +2,7 @@ package translate
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -86,14 +87,26 @@ func newClaudeState() *claudeStreamState {
 }
 
 // OpenAIStreamToClaudeStream translates an OpenAI SSE byte stream
-// into Claude Messages API SSE format.
-func OpenAIStreamToClaudeStream(openaiBody io.ReadCloser) io.ReadCloser {
+// into Claude Messages API SSE format. The ctx is used to cancel
+// reading from openaiBody when the client disconnects.
+func OpenAIStreamToClaudeStream(ctx context.Context, openaiBody io.ReadCloser) io.ReadCloser {
 	pr, pw := io.Pipe()
 	state := newClaudeState()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.With("component", "translate").Error("panic in stream goroutine", "panic", r)
+			}
+		}()
 		defer pw.Close()
 		defer openaiBody.Close()
+
+		// Close upstream body when context is cancelled to unblock scanner
+		go func() {
+			<-ctx.Done()
+			openaiBody.Close()
+		}()
 
 		scanner := bufio.NewScanner(openaiBody)
 		scanner.Buffer(make([]byte, 256*1024), 256*1024)
