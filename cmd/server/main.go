@@ -1,0 +1,183 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"expvar"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/pprof"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"opencode-proxy-api/config"
+	"opencode-proxy-api/internal/proxy"
+)
+
+func loadEnvFile() {
+	f, err := os.Open(".env")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("env parse error", "error", err)
+	}
+}
+
+// loggingMiddleware wraps an http.Handler with request ID and structured logging.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := fmt.Sprintf("req_%d", time.Now().UnixNano())
+		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
+		r = r.WithContext(ctx)
+		w.Header().Set("X-Request-Id", reqID)
+
+		start := time.Now()
+		lrw := &loggedResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(lrw, r)
+		duration := time.Since(start)
+
+		if r.URL.Path != "/health" {
+			slog.Info("request",
+				"req_id", reqID,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", lrw.statusCode,
+				"duration", duration.String(),
+			)
+		}
+	})
+}
+
+type loggedResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (lrw *loggedResponseWriter) WriteHeader(code int) {
+	lrw.statusCode = code
+	lrw.ResponseWriter.WriteHeader(code)
+}
+
+func main() {
+	loadEnvFile()
+
+	// Configure structured logging
+	lvl := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("OPCODE_LOG_LEVEL")) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	}
+	var handler slog.Handler
+	switch strings.ToLower(os.Getenv("OPCODE_LOG_FORMAT")) {
+	case "json":
+		handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
+	default:
+		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
+	}
+	slog.SetDefault(slog.New(handler))
+
+	log := slog.With("component", "server")
+	cfg := config.Load()
+
+	h := proxy.New(cfg)
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+
+	mux.Handle("/v1/chat/completions", h)
+	mux.Handle("/v1/messages", h)
+	mux.Handle("/v1/responses", h)
+	mux.Handle("/v1/models", h)
+
+	mux.Handle("/debug/vars", expvar.Handler())
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	server := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           loggingMiddleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		log.Info("shutting down gracefully...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Error("graceful shutdown error", "error", err)
+		}
+	}()
+
+	authMode := "no authentication"
+	if cfg.APIKey != "" {
+		authMode = "API key required"
+	}
+
+	log.Info("server starting",
+		"listen", cfg.ListenAddr,
+		"auth", authMode,
+		"upstream", cfg.UpstreamBase,
+	)
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Error("server error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// type for context keys
+type contextKey string
+
+const requestIDKey contextKey = "request_id"
+
+// RequestIDFromContext extracts the request ID from context (used by proxy).
+func RequestIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
