@@ -170,13 +170,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(resp.StatusCode)
 			claudeStream := translate.OpenAIStreamToClaudeStream(resp.Body)
 			defer claudeStream.Close()
-			io.Copy(w, claudeStream)
+			if _, err := io.Copy(w, claudeStream); err != nil {
+				log.Debug("response write error", "error", err)
+			}
 		} else {
 			out, _ := io.ReadAll(resp.Body)
 			claudeResp := translate.OpenAIResponseToClaudeResponse(out)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
-			w.Write(claudeResp)
+			if _, err := w.Write(claudeResp); err != nil {
+				log.Debug("response write error", "error", err)
+			}
 		}
 		return
 	}
@@ -188,10 +192,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if w.Header().Get("Content-Type") == "" {
 			w.Header().Set("Content-Type", "text/event-stream")
 		}
-		io.Copy(w, resp.Body)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			log.Debug("response write error", "error", err)
+		}
 	} else {
 		out, _ := io.ReadAll(resp.Body)
-		w.Write(out)
+		if _, err := w.Write(out); err != nil {
+			log.Debug("response write error", "error", err)
+		}
 	}
 }
 
@@ -262,7 +270,9 @@ func tryInjectReasoning(model string, body []byte) []byte {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.With("component", "proxy").Error("write json error", "error", err)
+	}
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message, errType string) {

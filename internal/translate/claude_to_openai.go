@@ -3,17 +3,17 @@ package translate
 import "encoding/json"
 
 type ClaudeRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ClaudeMessage `json:"messages"`
-	System      json.RawMessage `json:"system,omitempty"`
-	MaxTokens   int             `json:"max_tokens"`
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	Tools       []ClaudeTool    `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	StopSequences []string      `json:"stop_sequences,omitempty"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
-	Thinking    json.RawMessage `json:"thinking,omitempty"`
+	Model         string          `json:"model"`
+	Messages      []ClaudeMessage `json:"messages"`
+	System        json.RawMessage `json:"system,omitempty"`
+	MaxTokens     int             `json:"max_tokens"`
+	Stream        bool            `json:"stream,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	Tools         []ClaudeTool    `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
+	StopSequences []string        `json:"stop_sequences,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	Thinking      json.RawMessage `json:"thinking,omitempty"`
 }
 
 type ClaudeMessage struct {
@@ -48,27 +48,27 @@ type ClaudeTool struct {
 }
 
 type OpenAIChatRequest struct {
-	Model       string            `json:"model"`
-	Messages    []OpenAIMessage   `json:"messages"`
-	Stream      bool              `json:"stream,omitempty"`
-	MaxTokens   int               `json:"max_tokens,omitempty"`
-	Temperature *float64          `json:"temperature,omitempty"`
-	Tools       []OpenAITool      `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage   `json:"tool_choice,omitempty"`
-	Stop        interface{}       `json:"stop,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []OpenAIMessage `json:"messages"`
+	Stream      bool            `json:"stream,omitempty"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	Tools       []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	Stop        interface{}     `json:"stop,omitempty"`
 }
 
 type OpenAIMessage struct {
-	Role      string          `json:"role"`
-	Content   interface{}     `json:"content"`
-	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role       string           `json:"role"`
+	Content    interface{}      `json:"content"`
+	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 type ContentPart struct {
-	Type     string      `json:"type"`
-	Text     string      `json:"text,omitempty"`
-	ImageURL *ImageURL   `json:"image_url,omitempty"`
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
 
 type ImageURL struct {

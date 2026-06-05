@@ -48,12 +48,12 @@ func TestContainsFold(t *testing.T) {
 
 func TestShouldInject(t *testing.T) {
 	tests := []struct {
-		name     string
-		role     string
-		rc       interface{}
-		tc       interface{}
-		scope    string
-		want     bool
+		name  string
+		role  string
+		rc    interface{}
+		tc    interface{}
+		scope string
+		want  bool
 	}{
 		{"assistant no rc scope all", "assistant", "", nil, "all", true},
 		{"assistant has rc scope all", "assistant", " ", nil, "all", false},

@@ -15,32 +15,32 @@ type ClaudeSSEEvent map[string]interface{}
 
 // OpenAIStreamChunk represents one line of OpenAI SSE.
 type OpenAIStreamChunk struct {
-	ID      string           `json:"id,omitempty"`
-	Object  string           `json:"object,omitempty"`
-	Created int64            `json:"created,omitempty"`
-	Model   string           `json:"model,omitempty"`
-	Choices []OpenAIChoice  `json:"choices,omitempty"`
-	Usage   *OpenAIUsage    `json:"usage,omitempty"`
+	ID      string         `json:"id,omitempty"`
+	Object  string         `json:"object,omitempty"`
+	Created int64          `json:"created,omitempty"`
+	Model   string         `json:"model,omitempty"`
+	Choices []OpenAIChoice `json:"choices,omitempty"`
+	Usage   *OpenAIUsage   `json:"usage,omitempty"`
 }
 
 type OpenAIChoice struct {
-	Index int            `json:"index"`
-	Delta OpenAIChunkDelta `json:"delta"`
-	FinishReason *string `json:"finish_reason,omitempty"`
+	Index        int              `json:"index"`
+	Delta        OpenAIChunkDelta `json:"delta"`
+	FinishReason *string          `json:"finish_reason,omitempty"`
 }
 
 type OpenAIChunkDelta struct {
-	Role             string          `json:"role,omitempty"`
-	Content          string          `json:"content,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	Reasoning        string          `json:"reasoning,omitempty"`
+	Role             string                `json:"role,omitempty"`
+	Content          string                `json:"content,omitempty"`
+	ReasoningContent string                `json:"reasoning_content,omitempty"`
+	Reasoning        string                `json:"reasoning,omitempty"`
 	ToolCalls        []OpenAIDeltaToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIDeltaToolCall struct {
-	Index    int                `json:"index"`
-	ID       string             `json:"id,omitempty"`
-	Function *OpenAIDeltaFunc   `json:"function,omitempty"`
+	Index    int              `json:"index"`
+	ID       string           `json:"id,omitempty"`
+	Function *OpenAIDeltaFunc `json:"function,omitempty"`
 }
 
 type OpenAIDeltaFunc struct {
@@ -194,7 +194,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 			state.nextBlockIndex++
 			state.thinkingStarted = true
 			events = append(events, ClaudeSSEEvent{
-				"type": "content_block_start",
+				"type":  "content_block_start",
 				"index": state.thinkingIndex,
 				"content_block": map[string]interface{}{
 					"type":     "thinking",
@@ -204,7 +204,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 		}
 
 		events = append(events, ClaudeSSEEvent{
-			"type": "content_block_delta",
+			"type":  "content_block_delta",
 			"index": state.thinkingIndex,
 			"delta": map[string]interface{}{
 				"type":     "thinking_delta",
@@ -222,7 +222,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 			state.nextBlockIndex++
 			state.textStarted = true
 			events = append(events, ClaudeSSEEvent{
-				"type": "content_block_start",
+				"type":  "content_block_start",
 				"index": state.textIndex,
 				"content_block": map[string]interface{}{
 					"type": "text",
@@ -232,7 +232,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 		}
 
 		events = append(events, ClaudeSSEEvent{
-			"type": "content_block_delta",
+			"type":  "content_block_delta",
 			"index": state.textIndex,
 			"delta": map[string]interface{}{
 				"type": "text_delta",
@@ -253,7 +253,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 			state.nextBlockIndex++
 
 			events = append(events, ClaudeSSEEvent{
-				"type": "content_block_start",
+				"type":  "content_block_start",
 				"index": blockIdx,
 				"content_block": map[string]interface{}{
 					"type":  "tool_use",
@@ -272,7 +272,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 			// Replay any buffered arguments that arrived before the tool ID
 			if buf, hasBuf := state.toolArgBufs[idx]; hasBuf && buf != "" {
 				events = append(events, ClaudeSSEEvent{
-					"type": "content_block_delta",
+					"type":  "content_block_delta",
 					"index": blockIdx,
 					"delta": map[string]interface{}{
 						"type":         "input_json_delta",
@@ -287,7 +287,7 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 			info, ok := state.toolCalls[idx]
 			if ok {
 				events = append(events, ClaudeSSEEvent{
-					"type": "content_block_delta",
+					"type":  "content_block_delta",
 					"index": info.blockIndex,
 					"delta": map[string]interface{}{
 						"type":         "input_json_delta",
@@ -436,8 +436,8 @@ func OpenAIResponseToClaudeResponse(openaiBody []byte) []byte {
 
 	if reasoning != "" {
 		content = append(content, map[string]interface{}{
-			"type":      "thinking",
-			"thinking":  reasoning,
+			"type":     "thinking",
+			"thinking": reasoning,
 		})
 	}
 

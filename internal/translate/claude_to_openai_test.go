@@ -75,7 +75,9 @@ func TestConvertFinishReason(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 func ptrStr(p *string) string {
-	if p == nil { return "nil" }
+	if p == nil {
+		return "nil"
+	}
 	return *p
 }
 
@@ -190,7 +192,9 @@ func TestClaudeToOpenAI(t *testing.T) {
 	// System message as string
 	input = `{"model":"deepseek-v4","system":"You are helpful","messages":[{"role":"user","content":"hi"}]}`
 	output = ClaudeToOpenAI([]byte(input))
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 	if len(result.Messages) != 2 || result.Messages[0].Role != "system" {
 		t.Errorf("system message not first: got %+v", result.Messages)
 	}
@@ -198,7 +202,9 @@ func TestClaudeToOpenAI(t *testing.T) {
 	// System message as array
 	input = `{"model":"deepseek-v4","system":[{"type":"text","text":"Be helpful"}],"messages":[{"role":"user","content":"hi"}]}`
 	output = ClaudeToOpenAI([]byte(input))
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 	if len(result.Messages) != 2 || result.Messages[0].Role != "system" || result.Messages[0].Content != "Be helpful" {
 		t.Errorf("system array: got %+v", result.Messages)
 	}
@@ -206,7 +212,9 @@ func TestClaudeToOpenAI(t *testing.T) {
 	// Tool choice — auto
 	input = `{"model":"deepseek-v4","tool_choice":{"type":"auto"},"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"test","input_schema":{"type":"object"}}]}`
 	output = ClaudeToOpenAI([]byte(input))
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 	if result.ToolChoice != nil {
 		raw, _ := json.Marshal(result.ToolChoice)
 		if string(raw) != `"auto"` {
@@ -217,13 +225,17 @@ func TestClaudeToOpenAI(t *testing.T) {
 	// Tool choice — tool
 	input = `{"model":"deepseek-v4","tool_choice":{"type":"tool","name":"get_weather"},"messages":[{"role":"user","content":"hi"}]}`
 	output = ClaudeToOpenAI([]byte(input))
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 	var tc struct {
 		Type     string          `json:"type"`
 		Function json.RawMessage `json:"function"`
 	}
 	raw, _ := json.Marshal(result.ToolChoice)
-	json.Unmarshal(raw, &tc)
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		t.Fatal(err)
+	}
 	if tc.Type != "function" {
 		t.Errorf("tool_choice tool type: got %q", tc.Type)
 	}
@@ -231,7 +243,9 @@ func TestClaudeToOpenAI(t *testing.T) {
 	// Stop sequences
 	input = `{"model":"deepseek-v4","stop_sequences":["\n\n","."],"messages":[{"role":"user","content":"hi"}]}`
 	output = ClaudeToOpenAI([]byte(input))
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 	if result.Stop == nil {
 		t.Fatal("stop should be set")
 	}

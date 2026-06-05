@@ -1,8 +1,6 @@
 package config
 
 import (
-	"net"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -61,23 +59,6 @@ func Load() *Config {
 	if timeoutStr != "" {
 		if d, err := time.ParseDuration(timeoutStr); err == nil {
 			timeout = d
-		}
-	}
-
-	// Validate ListenAddr
-	if listen != "" {
-		if _, _, err := net.SplitHostPort(listen); err != nil {
-			// Try with leading ":" to provide default host
-			if _, _, err2 := net.SplitHostPort("0" + listen); err2 != nil {
-				// Non-fatal: server will fail at ListenAndServe with a clear error
-			}
-		}
-	}
-
-	// Validate UpstreamBase
-	if base != "" {
-		if _, err := url.Parse(base); err != nil {
-			// Non-fatal: upstream requests will fail with a clear error
 		}
 	}
 

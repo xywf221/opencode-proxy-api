@@ -40,10 +40,10 @@ func shouldInject(role string, rc interface{}, toolCalls interface{}, scope stri
 
 // Message represents a single chat message in OpenAI format.
 type Message struct {
-	Role             string        `json:"role"`
-	Content          interface{}   `json:"content"`
-	ReasoningContent interface{}   `json:"reasoning_content,omitempty"`
-	ToolCalls        interface{}   `json:"tool_calls,omitempty"`
+	Role             string      `json:"role"`
+	Content          interface{} `json:"content"`
+	ReasoningContent interface{} `json:"reasoning_content,omitempty"`
+	ToolCalls        interface{} `json:"tool_calls,omitempty"`
 }
 
 // ChatBody is the OpenAI chat completion request body.
@@ -52,15 +52,15 @@ type ChatBody struct {
 	Messages []Message `json:"messages"`
 	Stream   *bool     `json:"stream,omitempty"`
 	// passthrough fields
-	MaxTokens         *int                `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int              `json:"max_completion_tokens,omitempty"`
-	Temperature       *float64            `json:"temperature,omitempty"`
-	TopP              *float64            `json:"top_p,omitempty"`
-	Tools             []interface{}       `json:"tools,omitempty"`
-	ToolChoice        interface{}         `json:"tool_choice,omitempty"`
-	Stop              interface{}         `json:"stop,omitempty"`
-	ExtraBody         map[string]interface{} `json:"extra_body,omitempty"`
-	ReasoningEffort   interface{}         `json:"reasoning_effort,omitempty"`
+	MaxTokens           *int                   `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int                   `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64               `json:"temperature,omitempty"`
+	TopP                *float64               `json:"top_p,omitempty"`
+	Tools               []interface{}          `json:"tools,omitempty"`
+	ToolChoice          interface{}            `json:"tool_choice,omitempty"`
+	Stop                interface{}            `json:"stop,omitempty"`
+	ExtraBody           map[string]interface{} `json:"extra_body,omitempty"`
+	ReasoningEffort     interface{}            `json:"reasoning_effort,omitempty"`
 }
 
 // InjectReasoningContent adds a reasoning_content placeholder to assistant
@@ -71,7 +71,10 @@ func InjectReasoningContent(model string, body *ChatBody) *ChatBody {
 	}
 
 	// Find matching rule
-	var rule *struct{ match func(string) bool; scope string }
+	var rule *struct {
+		match func(string) bool
+		scope string
+	}
 	for _, r := range modelRules {
 		if r.match(model) {
 			rule = &r
@@ -91,17 +94,17 @@ func InjectReasoningContent(model string, body *ChatBody) *ChatBody {
 	}
 
 	return &ChatBody{
-		Model:                body.Model,
-		Messages:             msgs,
-		Stream:               body.Stream,
-		MaxTokens:            body.MaxTokens,
+		Model:               body.Model,
+		Messages:            msgs,
+		Stream:              body.Stream,
+		MaxTokens:           body.MaxTokens,
 		MaxCompletionTokens: body.MaxCompletionTokens,
-		Temperature:          body.Temperature,
-		TopP:                 body.TopP,
-		Tools:                body.Tools,
-		ToolChoice:           body.ToolChoice,
-		Stop:                 body.Stop,
-		ExtraBody:            body.ExtraBody,
-		ReasoningEffort:      body.ReasoningEffort,
+		Temperature:         body.Temperature,
+		TopP:                body.TopP,
+		Tools:               body.Tools,
+		ToolChoice:          body.ToolChoice,
+		Stop:                body.Stop,
+		ExtraBody:           body.ExtraBody,
+		ReasoningEffort:     body.ReasoningEffort,
 	}
 }

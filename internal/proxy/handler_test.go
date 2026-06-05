@@ -85,7 +85,9 @@ func TestListModels(t *testing.T) {
 	var resp struct {
 		Data []map[string]interface{} `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
 	if len(resp.Data) != 2 {
 		t.Errorf("expected 2 models, got %d", len(resp.Data))
 	}
@@ -237,7 +239,7 @@ func TestStreamingPassthrough(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: {}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -266,7 +268,7 @@ func TestNonStreamingPassthrough(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"123","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`))
+		_, _ = w.Write([]byte(`{"id":"123","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`))
 	}))
 	defer upstream.Close()
 
@@ -292,7 +294,7 @@ func TestClaudeStreaming(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -324,9 +326,9 @@ func TestClaudeStreaming(t *testing.T) {
 
 func TestParseRequestMeta(t *testing.T) {
 	tests := []struct {
-		name      string
-		body      string
-		wantModel string
+		name       string
+		body       string
+		wantModel  string
 		wantStream bool
 	}{
 		{"basic", `{"model":"deepseek-v4","stream":true}`, "deepseek-v4", true},
@@ -363,7 +365,9 @@ func TestWriteJSONError(t *testing.T) {
 			Type    string `json:"type"`
 		} `json:"error"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp.Error.Message != "bad stuff" || resp.Error.Type != "invalid_request_error" {
 		t.Errorf("error body: %+v", resp.Error)
 	}

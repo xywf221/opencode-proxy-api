@@ -1,11 +1,9 @@
-version: "2"
 run:
   timeout: 3m
-formatters:
-  enable:
-    - gofmt
+
 linters:
   enable:
+    - gofmt
     - govet
     - misspell
     - staticcheck

@@ -10,7 +10,9 @@ func TestOpenAIResponseToClaudeResponse(t *testing.T) {
 	input := `{"id":"123","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
 	output := OpenAIResponseToClaudeResponse([]byte(input))
 	var result map[string]interface{}
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 
 	if result["type"] != "message" {
 		t.Errorf("type = %v", result["type"])
@@ -39,7 +41,9 @@ func TestOpenAIResponseThinking(t *testing.T) {
 	input := `{"id":"msg_1","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":{"reasoning_content":"thinking...","text":"answer"}},"finish_reason":"stop"}]}`
 	output := OpenAIResponseToClaudeResponse([]byte(input))
 	var result map[string]interface{}
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 
 	content := result["content"].([]interface{})
 	if len(content) != 2 {
@@ -56,7 +60,9 @@ func TestOpenAIResponseToolCalls(t *testing.T) {
 	input := `{"id":"msg_1","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"NYC\"}"}}]},"finish_reason":"tool_calls"}]}`
 	output := OpenAIResponseToClaudeResponse([]byte(input))
 	var result map[string]interface{}
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 
 	if result["stop_reason"] != "tool_use" {
 		t.Errorf("stop_reason = %v, want tool_use", result["stop_reason"])
@@ -76,7 +82,9 @@ func TestOpenAIEmptyContent(t *testing.T) {
 	input := `{"id":"msg_1","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop"}]}`
 	output := OpenAIResponseToClaudeResponse([]byte(input))
 	var result map[string]interface{}
-	json.Unmarshal(output, &result)
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
 	content := result["content"].([]interface{})
 	if len(content) != 0 {
 		t.Errorf("expected empty content, got %d blocks", len(content))
