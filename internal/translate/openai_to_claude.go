@@ -147,7 +147,7 @@ func OpenAIStreamToClaudeStream(ctx context.Context, openaiBody io.ReadCloser) i
 		}
 
 		if state.messageStartSent && !state.stopSent {
-			events := buildStopEvents(state, nil, nil)
+			events := buildStopEvents(state, state.pendingFinishReason, state.usage)
 			for _, e := range events {
 				writeClaudeEvent(pw, e)
 			}
@@ -273,6 +273,10 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 
 			blockIdx := state.nextBlockIndex
 			state.nextBlockIndex++
+			name := ""
+			if tc.Function != nil {
+				name = tc.Function.Name
+			}
 
 			events = append(events, ClaudeSSEEvent{
 				"type":  "content_block_start",
@@ -280,14 +284,14 @@ func translateChunk(state *claudeStreamState, chunk *OpenAIStreamChunk) []Claude
 				"content_block": map[string]interface{}{
 					"type":  "tool_use",
 					"id":    tc.ID,
-					"name":  tc.Function.Name,
+					"name":  name,
 					"input": map[string]interface{}{},
 				},
 			})
 
 			state.toolCalls[idx] = toolCallInfo{
 				id:         tc.ID,
-				name:       tc.Function.Name,
+				name:       name,
 				blockIndex: blockIdx,
 			}
 
@@ -453,12 +457,7 @@ func OpenAIResponseToClaudeResponse(openaiBody []byte) []byte {
 
 	var content []map[string]interface{}
 
-	var reasoning string
-	if m, ok := msg.Content.(map[string]interface{}); ok {
-		if rc, ok := m["reasoning_content"].(string); ok {
-			reasoning = rc
-		}
-	}
+	reasoning := extractOpenAIReasoning(msg)
 
 	if reasoning != "" {
 		content = append(content, map[string]interface{}{
@@ -467,16 +466,7 @@ func OpenAIResponseToClaudeResponse(openaiBody []byte) []byte {
 		})
 	}
 
-	text := ""
-	switch t := msg.Content.(type) {
-	case string:
-		text = t
-	case nil:
-		text = ""
-	default:
-		b, _ := json.Marshal(t)
-		text = string(b)
-	}
+	text := extractOpenAIText(msg.Content)
 	if text != "" {
 		content = append(content, map[string]interface{}{
 			"type": "text",
@@ -533,6 +523,52 @@ func OpenAIResponseToClaudeResponse(openaiBody []byte) []byte {
 
 	out, _ := json.Marshal(claudeResp)
 	return out
+}
+
+func extractOpenAIReasoning(msg OpenAIMessage) string {
+	if msg.ReasoningContent != "" {
+		return msg.ReasoningContent
+	}
+	if m, ok := msg.Content.(map[string]interface{}); ok {
+		if rc, ok := m["reasoning_content"].(string); ok {
+			return rc
+		}
+		if rc, ok := m["reasoning"].(string); ok {
+			return rc
+		}
+	}
+	return ""
+}
+
+func extractOpenAIText(content interface{}) string {
+	switch t := content.(type) {
+	case string:
+		return t
+	case nil:
+		return ""
+	case map[string]interface{}:
+		if text, ok := t["text"].(string); ok {
+			return text
+		}
+		if text, ok := t["content"].(string); ok {
+			return text
+		}
+		filtered := make(map[string]interface{}, len(t))
+		for k, v := range t {
+			if k == "reasoning_content" || k == "reasoning" {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) == 0 {
+			return ""
+		}
+		b, _ := json.Marshal(filtered)
+		return string(b)
+	default:
+		b, _ := json.Marshal(t)
+		return string(b)
+	}
 }
 
 func parseJSON(raw string) interface{} {

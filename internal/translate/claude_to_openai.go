@@ -65,10 +65,11 @@ type OpenAIStreamOptions struct {
 }
 
 type OpenAIMessage struct {
-	Role       string           `json:"role"`
-	Content    interface{}      `json:"content"`
-	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
+	Role             string           `json:"role"`
+	Content          interface{}      `json:"content"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
 }
 
 type ContentPart struct {

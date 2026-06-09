@@ -214,14 +214,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forwardHeaders(w, resp)
-	w.WriteHeader(resp.StatusCode)
-
 	if isStream {
 		log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
+		forwardHeaders(w, resp)
 		if w.Header().Get("Content-Type") == "" {
 			w.Header().Set("Content-Type", "text/event-stream")
 		}
+		w.WriteHeader(resp.StatusCode)
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			log.Debug("response write error", "error", err)
 		}
@@ -234,6 +233,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		prompt, comp := extractUsage(out)
 		log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
+		forwardHeaders(w, resp)
+		w.WriteHeader(resp.StatusCode)
 		if _, err := w.Write(out); err != nil {
 			log.Debug("response write error", "error", err)
 		}

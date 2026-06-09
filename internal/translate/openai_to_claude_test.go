@@ -1,7 +1,10 @@
 package translate
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +56,32 @@ func TestOpenAIResponseThinking(t *testing.T) {
 	thinking := content[0].(map[string]interface{})
 	if thinking["type"] != "thinking" || thinking["thinking"] != "thinking..." {
 		t.Errorf("thinking block: %+v", thinking)
+	}
+	text := content[1].(map[string]interface{})
+	if text["type"] != "text" || text["text"] != "answer" {
+		t.Errorf("text block: %+v", text)
+	}
+}
+
+func TestOpenAIResponseTopLevelReasoning(t *testing.T) {
+	input := `{"id":"msg_1","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":"thinking..."},"finish_reason":"stop"}]}`
+	output := OpenAIResponseToClaudeResponse([]byte(input))
+	var result map[string]interface{}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
+
+	content := result["content"].([]interface{})
+	if len(content) != 2 {
+		t.Fatalf("expected 2 content blocks (thinking + text), got %d", len(content))
+	}
+	thinking := content[0].(map[string]interface{})
+	if thinking["type"] != "thinking" || thinking["thinking"] != "thinking..." {
+		t.Errorf("thinking block: %+v", thinking)
+	}
+	text := content[1].(map[string]interface{})
+	if text["type"] != "text" || text["text"] != "answer" {
+		t.Errorf("text block: %+v", text)
 	}
 }
 
@@ -197,6 +226,28 @@ func TestTranslateChunk(t *testing.T) {
 		}
 	})
 
+	t.Run("tool_call_without_function", func(t *testing.T) {
+		state := newClaudeState()
+		state.messageStartSent = true
+
+		chunk := &OpenAIStreamChunk{
+			Choices: []OpenAIChoice{{
+				Delta: OpenAIChunkDelta{
+					ToolCalls: []OpenAIDeltaToolCall{
+						{Index: 0, ID: "call_1"},
+					},
+				},
+			}},
+		}
+		events := translateChunk(state, chunk)
+		if len(events) == 0 {
+			t.Fatal("expected events")
+		}
+		if _, ok := state.toolCalls[0]; !ok {
+			t.Fatalf("expected tool call state to be recorded")
+		}
+	})
+
 	t.Run("finish_reason", func(t *testing.T) {
 		state := newClaudeState()
 		state.messageStartSent = true
@@ -315,6 +366,39 @@ func TestBuildStopEvents(t *testing.T) {
 			t.Errorf("expected at least 1 content_block_stop for tool, got %d", blockStops)
 		}
 	})
+}
+
+func TestOpenAIStreamEOFUsesPendingStopReason(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream := strings.Join([]string{
+		`data: {"id":"1","model":"deepseek-v4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}`,
+		`data: {"id":"1","model":"deepseek-v4","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`,
+		``,
+	}, "\n\n")
+
+	rc := OpenAIStreamToClaudeStream(ctx, io.NopCloser(strings.NewReader(stream)))
+	defer rc.Close()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(out)
+	if !strings.Contains(body, `event: message_stop`) {
+		t.Fatalf("expected message_stop event, got: %s", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("expected preserved stop reason, got: %s", body)
+	}
+	messageDeltaIndex := strings.Index(body, "event: message_delta")
+	if messageDeltaIndex == -1 {
+		t.Fatalf("expected message_delta event, got: %s", body)
+	}
+	messageDelta := body[messageDeltaIndex:]
+	if strings.Contains(messageDelta, `"input_tokens"`) {
+		t.Fatalf("message_delta usage should not include input_tokens: %s", body)
+	}
 }
 
 func TestOpenAIErrorToClaudeError(t *testing.T) {

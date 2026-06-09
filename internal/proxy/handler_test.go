@@ -290,6 +290,46 @@ func TestNonStreamingPassthrough(t *testing.T) {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("read failed")
+}
+
+func (failingReadCloser) Close() error {
+	return nil
+}
+
+func TestNonStreamingReadErrorReturnsBadGateway(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.UpstreamBase = "http://upstream.test"
+	h := New(cfg)
+	h.upstream = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       failingReadCloser{},
+			}, nil
+		}),
+	}
+
+	body := `{"model":"deepseek-v4","messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502. Body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestClaudeStreaming(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var upstreamReq struct {
