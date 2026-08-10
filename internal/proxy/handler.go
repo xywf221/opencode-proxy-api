@@ -15,13 +15,11 @@ import (
 
 	"github.com/xywf221/opencode-proxy-api/config"
 	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
-	"github.com/xywf221/opencode-proxy-api/internal/translate"
 )
 
 type endpointConfig struct {
 	upstreamPath string
 	needInject   bool
-	isClaude     bool
 }
 
 var endpoints = map[string]endpointConfig{
@@ -30,8 +28,7 @@ var endpoints = map[string]endpointConfig{
 		needInject:   true,
 	},
 	"/v1/messages": {
-		upstreamPath: "/zen/v1/chat/completions",
-		isClaude:     true,
+		upstreamPath: "/zen/v1/messages",
 	},
 	"/v1/responses": {
 		upstreamPath: "/zen/v1/responses",
@@ -149,9 +146,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	forwardBody := bodyBytes
-	if ep.isClaude {
-		forwardBody = translate.ClaudeBodyToOpenAI(bodyBytes)
-	} else if ep.needInject {
+	if ep.needInject {
 		forwardBody = tryInjectReasoning(model, bodyBytes)
 	}
 
@@ -168,6 +163,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	upstreamReq.Header.Set("Authorization", "Bearer "+h.cfg.UpstreamToken)
 	upstreamReq.Header.Set("x-opencode-client", "desktop")
+	// Forward Anthropic-compatible headers when present (used by /v1/messages clients).
+	if v := r.Header.Get("anthropic-version"); v != "" {
+		upstreamReq.Header.Set("anthropic-version", v)
+	}
+	if v := r.Header.Get("x-api-key"); v != "" {
+		upstreamReq.Header.Set("x-api-key", v)
+	}
 
 	resp, err := h.upstream.Do(upstreamReq)
 	if err != nil {
@@ -179,43 +181,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(start)
 
-	if ep.isClaude {
-		if resp.StatusCode != http.StatusOK {
-			out, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBodySize))
-			log.Warn("upstream non-200 for claude endpoint", "status", resp.StatusCode)
-			writeJSON(w, resp.StatusCode, translate.OpenAIErrorToClaudeError(out))
-			return
-		}
-		if isStream {
-			log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.WriteHeader(resp.StatusCode)
-			claudeStream := translate.OpenAIStreamToClaudeStream(r.Context(), resp.Body)
-			defer claudeStream.Close()
-			if _, err := io.Copy(w, claudeStream); err != nil {
-				log.Debug("response write error", "error", err)
-			}
-		} else {
-			out, err := readUpstreamBody(resp.Body)
-			if err != nil {
-				log.Error("failed to read upstream response", "error", err)
-				writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
-				return
-			}
-			prompt, comp := extractUsage(out)
-			log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
-			claudeResp := translate.OpenAIResponseToClaudeResponse(out)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(resp.StatusCode)
-			if _, err := w.Write(claudeResp); err != nil {
-				log.Debug("response write error", "error", err)
-			}
-		}
-		return
-	}
-
 	if isStream {
 		log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
 		forwardHeaders(w, resp)
@@ -226,20 +191,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			log.Debug("response write error", "error", err)
 		}
-	} else {
-		out, err := readUpstreamBody(resp.Body)
-		if err != nil {
-			log.Error("failed to read upstream response", "error", err)
-			writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
-			return
-		}
-		prompt, comp := extractUsage(out)
-		log.With("prompt_tokens", prompt, "completion_tokens", comp).Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
-		forwardHeaders(w, resp)
-		w.WriteHeader(resp.StatusCode)
-		if _, err := w.Write(out); err != nil {
-			log.Debug("response write error", "error", err)
-		}
+		return
+	}
+
+	out, err := readUpstreamBody(resp.Body)
+	if err != nil {
+		log.Error("failed to read upstream response", "error", err)
+		writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
+		return
+	}
+	log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
+	forwardHeaders(w, resp)
+	w.WriteHeader(resp.StatusCode)
+	if _, err := w.Write(out); err != nil {
+		log.Debug("response write error", "error", err)
 	}
 }
 
@@ -320,20 +285,6 @@ func readUpstreamBody(body io.ReadCloser) ([]byte, error) {
 		return nil, fmt.Errorf("upstream response exceeds %d bytes", maxUpstreamBodySize)
 	}
 	return out, nil
-}
-
-// extractUsage attempts to parse token usage from an OpenAI response body.
-func extractUsage(body []byte) (prompt, completion int) {
-	var v struct {
-		Usage *struct {
-			Prompt     int `json:"prompt_tokens"`
-			Completion int `json:"completion_tokens"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal(body, &v) == nil && v.Usage != nil {
-		return v.Usage.Prompt, v.Usage.Completion
-	}
-	return 0, 0
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

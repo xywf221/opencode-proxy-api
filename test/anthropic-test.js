@@ -9,9 +9,8 @@
  *   node anthropic-test.js http://localhost:8080 deepseek-v4-flash-free
  *   node anthropic-test.js http://localhost:8080 minimax-m2.5
  *
- * If the model doesn't support the Claude format upstream (free models),
- * the test verifies the proxy routes the request correctly (upstream
- * returns a meaningful error, not a 502/404 from the proxy).
+ * Upstream now natively supports Anthropic Messages at /zen/v1/messages;
+ * the proxy forwards request/response bodies as-is (no translation).
  * Set OPCODE_UPSTREAM_TOKEN for paid models that need auth.
  * Set OPCODE_API_KEY if the proxy requires auth.
  */

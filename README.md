@@ -12,9 +12,9 @@ This project mirrors the approach used by [9router](https://github.com/decolua/9
 |---|---|---|
 | OpenAI Chat Completions | `POST /v1/chat/completions` | `/zen/v1/chat/completions` |
 | OpenAI Responses API | `POST /v1/responses` | `/zen/v1/responses` |
-| Anthropic Messages | `POST /v1/messages` | `/zen/v1/chat/completions` (translated) |
+| Anthropic Messages | `POST /v1/messages` | `/zen/v1/messages` |
 
-The `/v1/messages` endpoint translates Claude Messages format to OpenAI Chat Completions format before forwarding, and translates the response back — enabling free-model access through the Anthropic SDK.
+All three endpoints are forwarded to the matching upstream paths. Request and response bodies are passed through as-is (no format translation).
 
 ## Quick Start
 
@@ -42,12 +42,12 @@ curl http://localhost:8080/v1/responses \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash-free","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}'
 
-# Anthropic Messages format
+# Anthropic Messages format (prefer content blocks)
 curl http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: public" \
   -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"minimax-m2.5","messages":[{"role":"user","content":"hello"}],"max_tokens":256}'
+  -d '{"model":"deepseek-v4-flash-free","max_tokens":256,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}'
 ```
 
 ## Unit Tests

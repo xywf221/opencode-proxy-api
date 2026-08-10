@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Standalone Go proxy for opencode.ai. Exposes three API formats (OpenAI Chat Completions, OpenAI Responses API, Anthropic Messages) through a single HTTP server. Translates between Claude and OpenAI formats where needed.
+Standalone Go proxy for opencode.ai. Exposes three API formats (OpenAI Chat Completions, OpenAI Responses API, Anthropic Messages) through a single HTTP server. All formats are forwarded to matching upstream `/zen/v1/*` paths with no format translation.
 
 ## Key Files
 
@@ -11,40 +11,23 @@ Standalone Go proxy for opencode.ai. Exposes three API formats (OpenAI Chat Comp
 | `cmd/server/main.go` | Entry point. Loads .env, starts HTTP server. Routes: /v1/chat/completions, /v1/messages, /v1/responses, /v1/models, /health |
 | `config/config.go` | Config from env: OPCODE_API_KEY, OPCODE_ALLOWED_MODELS, OPCODE_LISTEN, OPCODE_UPSTREAM_BASE, OPCODE_UPSTREAM_TOKEN, OPCODE_UPSTREAM_TIMEOUT, OPCODE_PROXY (http/https/socks5/socks5h). Builds upstream http.Client via NewUpstreamClient. |
 | `build.sh` / `build.cmd` | Cross-compile helpers; default package `./cmd/server`, binary name `opencode-proxy` |
-| `internal/proxy/handler.go` | HTTP handler. CORS, auth, model filtering, routing to upstream, response translation |
-| `internal/translate/claude_to_openai.go` | Claude Messages → OpenAI Chat Completions (request direction). Handles: system→separate message, tool_use→tool_calls, tool_result→tool messages, fixMissingToolResponses |
-| `internal/translate/openai_to_claude.go` | OpenAI → Claude Messages (response direction). SSE streaming translator. Both streaming and non-streaming paths |
-| `internal/reasoning/inject.go` | Injects `reasoning_content: " "` placeholder for DeepSeek/Kimi models |
+| `internal/proxy/handler.go` | HTTP handler. CORS, auth, model filtering, passthrough routing to upstream |
+| `internal/reasoning/inject.go` | Injects `reasoning_content: " "` placeholder for DeepSeek/Kimi models on chat/completions only |
 
 ## Architecture
 
 ```
-Client ──► /v1/messages ──► Claude→OpenAI ──► opencode.ai /zen/v1/chat/completions ──► OpenAI→Claude ──► Client
+Client ──► /v1/messages ──► (passthrough) ──► opencode.ai /zen/v1/messages
 Client ──► /v1/chat/completions ──► (passthrough, optional reasoning inject) ──► opencode.ai /zen/v1/chat/completions
-Client ──► /v1/responses ──► (full passthrough) ──► opencode.ai /zen/v1/responses
+Client ──► /v1/responses ──► (passthrough) ──► opencode.ai /zen/v1/responses
 ```
 
-## Translation Details
+## Notes
 
-### Claude→OpenAI (request)
-- `tool` role → `user` role
-- `tool_use` content blocks → `tool_calls` on assistant message
-- `tool_result` content blocks → separate tool-role messages
-- `fixMissingToolResponses`: injects `"[No response received]"` for unmatched tool_call_ids
-- tool_result `content` field → OpenAI tool message content
-
-### OpenAI→Claude (response, streaming)
-- SSE format: `event: <type>\ndata: <json>\n\n`
-- `reasoning_content` / `reasoning` → `thinking` blocks (thinking_delta events)
-- `tool_calls` → `tool_use` content blocks (incremental `input_json_delta`)
-- DO NOT re-emit accumulated tool args in buildStopEvents — incremental deltas are already streamed
-
-## Common Bugs to Avoid
-
-1. **input_json_delta double-emit**: buildStopEvents must NOT emit accumulated tool args — they were already streamed incrementally. Only emit content_block_stop.
-2. **tool_result.content field**: tool_result uses `content` (not `input`) in the Claude API. ContentBlock struct must have both fields.
-3. **Go slice pass-by-value**: fixMissingToolResponses must return the slice because append may reallocate.
-4. **SSE event prefix**: Anthropic SDK requires `event: <type>\n` before `data: <json>\n\n`.
+- No Claude↔OpenAI translation: upstream natively supports Anthropic Messages and OpenAI Responses under `/zen/v1/*`.
+- For `/v1/messages`, prefer Anthropic content blocks (`content: [{"type":"text","text":"..."}]`); plain string content can fail upstream with "Messages cannot be empty".
+- `anthropic-version` and client `x-api-key` headers are forwarded on `/v1/messages`.
+- Reasoning injection only applies to `/v1/chat/completions`.
 
 ## Testing
 

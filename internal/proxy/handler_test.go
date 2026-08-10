@@ -349,23 +349,18 @@ func TestNonStreamingReadErrorReturnsBadGateway(t *testing.T) {
 	}
 }
 
-func TestClaudeStreaming(t *testing.T) {
+func TestMessagesPassthrough(t *testing.T) {
+	var gotPath, gotAnthropicVersion, gotAPIKey string
+	var gotBody map[string]interface{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var upstreamReq struct {
-			StreamOptions *struct {
-				IncludeUsage bool `json:"include_usage"`
-			} `json:"stream_options"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&upstreamReq); err != nil {
-			t.Errorf("decode upstream request: %v", err)
-		}
-		if upstreamReq.StreamOptions == nil || !upstreamReq.StreamOptions.IncludeUsage {
-			t.Errorf("stream_options.include_usage should be true: %+v", upstreamReq.StreamOptions)
-		}
+		gotPath = r.URL.Path
+		gotAnthropicVersion = r.Header.Get("anthropic-version")
+		gotAPIKey = r.Header.Get("x-api-key")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"deepseek-v4","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}`))
 	}))
 	defer upstream.Close()
 
@@ -373,28 +368,69 @@ func TestClaudeStreaming(t *testing.T) {
 	cfg.UpstreamBase = upstream.URL
 
 	h := mustNew(t, cfg)
-	body := `{"model":"deepseek-v4","stream":true,"messages":[{"role":"user","content":"hi"}],"max_tokens":100}`
+	body := `{"model":"deepseek-v4","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	req.Header.Set("x-api-key", "test")
+	req.Header.Set("x-api-key", "client-key")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
 	}
+	if gotPath != "/zen/v1/messages" {
+		t.Errorf("upstream path = %q, want /zen/v1/messages", gotPath)
+	}
+	if gotAnthropicVersion != "2023-06-01" {
+		t.Errorf("anthropic-version = %q, want 2023-06-01", gotAnthropicVersion)
+	}
+	if gotAPIKey != "client-key" {
+		t.Errorf("x-api-key = %q, want client-key", gotAPIKey)
+	}
+	// Body must be forwarded as-is (no Claude→OpenAI translation).
+	if _, ok := gotBody["stream_options"]; ok {
+		t.Errorf("unexpected stream_options injection: %#v", gotBody)
+	}
+	if !strings.Contains(rec.Body.String(), `"type":"message"`) {
+		t.Errorf("expected native Claude response, got: %s", rec.Body.String())
+	}
+}
 
-	// Should get Claude-format SSE events
-	bodyStr := rec.Body.String()
-	if !strings.Contains(bodyStr, "event: message_start") {
-		t.Error("expected Claude message_start event")
+func TestResponsesPassthrough(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"deepseek-v4","output":[],"usage":{"input_tokens":5,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+
+	h := mustNew(t, cfg)
+	body := `{"model":"deepseek-v4","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(bodyStr, "event: message_stop") {
-		t.Error("expected Claude message_stop event")
+	if gotPath != "/zen/v1/responses" {
+		t.Errorf("upstream path = %q, want /zen/v1/responses", gotPath)
 	}
-	if !strings.Contains(bodyStr, `"output_tokens":5`) {
-		t.Errorf("expected output_tokens in Claude stream, got: %s", bodyStr)
+	if _, ok := gotBody["input"]; !ok {
+		t.Errorf("expected input field forwarded, got: %#v", gotBody)
+	}
+	if !strings.Contains(rec.Body.String(), `"object":"response"`) {
+		t.Errorf("expected native responses body, got: %s", rec.Body.String())
 	}
 }
 
