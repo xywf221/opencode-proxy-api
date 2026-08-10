@@ -107,7 +107,11 @@ func main() {
 	log := slog.With("component", "server")
 	cfg := config.Load()
 
-	h := proxy.New(cfg)
+	h, err := proxy.New(cfg)
+	if err != nil {
+		log.Error("failed to create handler", "error", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 
@@ -149,10 +153,16 @@ func main() {
 		authMode = "API key required"
 	}
 
+	proxyMode := "direct"
+	if cfg.ProxyURL != "" {
+		proxyMode = cfg.ProxyURL
+	}
+
 	log.Info("server starting",
 		"listen", cfg.ListenAddr,
 		"auth", authMode,
 		"upstream", cfg.UpstreamBase,
+		"proxy", proxyMode,
 	)
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

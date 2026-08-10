@@ -9,7 +9,8 @@ Standalone Go proxy for opencode.ai. Exposes three API formats (OpenAI Chat Comp
 | File | Purpose |
 |---|---|
 | `cmd/server/main.go` | Entry point. Loads .env, starts HTTP server. Routes: /v1/chat/completions, /v1/messages, /v1/responses, /v1/models, /health |
-| `config/config.go` | Config struct loaded from env vars. OPCODE_API_KEY, OPCODE_ALLOWED_MODELS (comma-separated), OPCODE_LISTEN, OPCODE_UPSTREAM_BASE, OPCODE_UPSTREAM_TOKEN |
+| `config/config.go` | Config from env: OPCODE_API_KEY, OPCODE_ALLOWED_MODELS, OPCODE_LISTEN, OPCODE_UPSTREAM_BASE, OPCODE_UPSTREAM_TOKEN, OPCODE_UPSTREAM_TIMEOUT, OPCODE_PROXY (http/https/socks5/socks5h). Builds upstream http.Client via NewUpstreamClient. |
+| `build.sh` / `build.cmd` | Cross-compile helpers; default package `./cmd/server`, binary name `opencode-proxy` |
 | `internal/proxy/handler.go` | HTTP handler. CORS, auth, model filtering, routing to upstream, response translation |
 | `internal/translate/claude_to_openai.go` | Claude Messages → OpenAI Chat Completions (request direction). Handles: system→separate message, tool_use→tool_calls, tool_result→tool messages, fixMissingToolResponses |
 | `internal/translate/openai_to_claude.go` | OpenAI → Claude Messages (response direction). SSE streaming translator. Both streaming and non-streaming paths |

@@ -43,13 +43,15 @@ type Handler struct {
 	upstream *http.Client
 }
 
-func New(cfg *config.Config) *Handler {
-	return &Handler{
-		cfg: cfg,
-		upstream: &http.Client{
-			Timeout: cfg.UpstreamTimeout,
-		},
+func New(cfg *config.Config) (*Handler, error) {
+	client, err := cfg.NewUpstreamClient()
+	if err != nil {
+		return nil, fmt.Errorf("upstream client: %w", err)
 	}
+	return &Handler{
+		cfg:      cfg,
+		upstream: client,
+	}, nil
 }
 
 // reqLog builds a component+request-id logger from context.

@@ -19,8 +19,14 @@ The `/v1/messages` endpoint translates Claude Messages format to OpenAI Chat Com
 ## Quick Start
 
 ```bash
+# Build (or use ./build.sh / build.cmd)
 go build -o opencode-proxy ./cmd/server
 ./opencode-proxy
+
+# Cross-compile / local install helpers
+./build.sh --local                 # Linux/macOS/Git Bash
+build.cmd --local                  # Windows cmd
+./build.sh --os linux --arch amd64
 ```
 
 Test it:
@@ -60,8 +66,22 @@ go test -race -count=1 ./...
 | `OPCODE_UPSTREAM_BASE` | `https://opencode.ai` | Upstream base URL. |
 | `OPCODE_UPSTREAM_TOKEN` | `public` | Bearer token sent to upstream. |
 | `OPCODE_UPSTREAM_TIMEOUT` | `5m` | Upstream HTTP request timeout (Go duration format). |
+| `OPCODE_PROXY` | *(empty)* | Outbound proxy for upstream requests. Schemes: `http`, `https`, `socks5`, `socks5h`. |
 | `OPCODE_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error`. |
 | `OPCODE_LOG_FORMAT` | `text` | Log format: `text` or `json`. |
+
+### Proxy examples
+
+```bash
+# SOCKS5 with local DNS resolution
+OPCODE_PROXY=socks5://127.0.0.1:1080 ./opencode-proxy
+
+# SOCKS5 with remote DNS (socks5h) — preferred when local DNS is blocked
+OPCODE_PROXY=socks5h://127.0.0.1:1080 ./opencode-proxy
+
+# HTTP proxy (optional basic auth)
+OPCODE_PROXY=http://user:pass@127.0.0.1:8080 ./opencode-proxy
+```
 
 ## CI
 

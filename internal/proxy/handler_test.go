@@ -38,8 +38,27 @@ func withAllowedModels(models ...string) func(*config.Config) {
 		c.AllowedModels = m
 	}
 }
+
+func mustNew(t *testing.T, cfg *config.Config) *Handler {
+	t.Helper()
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return h
+}
+
+func TestNewInvalidProxy(t *testing.T) {
+	cfg := newTestConfig(func(c *config.Config) {
+		c.ProxyURL = "ftp://127.0.0.1:21"
+	})
+	if _, err := New(cfg); err == nil {
+		t.Fatal("New with invalid proxy scheme should fail")
+	}
+}
+
 func TestCORSPreflight(t *testing.T) {
-	h := New(newTestConfig())
+	h := mustNew(t, newTestConfig())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
 
@@ -57,7 +76,7 @@ func TestCORSPreflight(t *testing.T) {
 }
 
 func TestCORSOnAPIResponse(t *testing.T) {
-	h := New(newTestConfig())
+	h := mustNew(t, newTestConfig())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 
@@ -73,7 +92,7 @@ func TestCORSOnAPIResponse(t *testing.T) {
 // Test /v1/models
 
 func TestListModels(t *testing.T) {
-	h := New(newTestConfig(withAllowedModels("deepseek-v4", "gpt-4")))
+	h := mustNew(t, newTestConfig(withAllowedModels("deepseek-v4", "gpt-4")))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 
@@ -94,7 +113,7 @@ func TestListModels(t *testing.T) {
 }
 
 func TestListModelsWithAuth(t *testing.T) {
-	h := New(newTestConfig(withAPIKey("secret")))
+	h := mustNew(t, newTestConfig(withAPIKey("secret")))
 	rec := httptest.NewRecorder()
 
 	// No API key → 401
@@ -126,7 +145,7 @@ func TestListModelsWithAuth(t *testing.T) {
 // Test authentication on proxy endpoints
 
 func TestAuth(t *testing.T) {
-	h := New(newTestConfig(withAPIKey("secret")))
+	h := mustNew(t, newTestConfig(withAPIKey("secret")))
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 
 	tests := []struct {
@@ -166,7 +185,7 @@ func TestAuth(t *testing.T) {
 // Test model allowlist
 
 func TestModelAllowlist(t *testing.T) {
-	h := New(newTestConfig(withAllowedModels("deepseek-v4")))
+	h := mustNew(t, newTestConfig(withAllowedModels("deepseek-v4")))
 	body := func(model string) string {
 		return fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
 	}
@@ -194,7 +213,7 @@ func TestModelAllowlist(t *testing.T) {
 }
 
 func TestEmptyModel(t *testing.T) {
-	h := New(newTestConfig())
+	h := mustNew(t, newTestConfig())
 	body := `{"messages":[{"role":"user","content":"hi"}]}`
 
 	rec := httptest.NewRecorder()
@@ -209,7 +228,7 @@ func TestEmptyModel(t *testing.T) {
 // Test routing
 
 func TestUnknownEndpoint(t *testing.T) {
-	h := New(newTestConfig())
+	h := mustNew(t, newTestConfig())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/unknown", nil)
 
@@ -221,7 +240,7 @@ func TestUnknownEndpoint(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	h := New(newTestConfig())
+	h := mustNew(t, newTestConfig())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 
@@ -246,7 +265,7 @@ func TestStreamingPassthrough(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.UpstreamBase = upstream.URL
 
-	h := New(cfg)
+	h := mustNew(t, cfg)
 	body := `{"model":"deepseek-v4","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
 	rec := httptest.NewRecorder()
@@ -275,7 +294,7 @@ func TestNonStreamingPassthrough(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.UpstreamBase = upstream.URL
 
-	h := New(cfg)
+	h := mustNew(t, cfg)
 	body := `{"model":"deepseek-v4","messages":[{"role":"user","content":"hi"}]}`
 
 	rec := httptest.NewRecorder()
@@ -309,7 +328,7 @@ func (failingReadCloser) Close() error {
 func TestNonStreamingReadErrorReturnsBadGateway(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.UpstreamBase = "http://upstream.test"
-	h := New(cfg)
+	h := mustNew(t, cfg)
 	h.upstream = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -353,7 +372,7 @@ func TestClaudeStreaming(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.UpstreamBase = upstream.URL
 
-	h := New(cfg)
+	h := mustNew(t, cfg)
 	body := `{"model":"deepseek-v4","stream":true,"messages":[{"role":"user","content":"hi"}],"max_tokens":100}`
 
 	rec := httptest.NewRecorder()
