@@ -15,11 +15,15 @@ import (
 
 	"github.com/xywf221/opencode-proxy-api/config"
 	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
+	"github.com/xywf221/opencode-proxy-api/internal/translate"
 )
 
 type endpointConfig struct {
 	upstreamPath string
 	needInject   bool
+	// adaptClaudeTools rewrites Anthropic tools/tool_use for upstream,
+	// which still validates tools as OpenAI function tools.
+	adaptClaudeTools bool
 }
 
 var endpoints = map[string]endpointConfig{
@@ -28,7 +32,8 @@ var endpoints = map[string]endpointConfig{
 		needInject:   true,
 	},
 	"/v1/messages": {
-		upstreamPath: "/zen/v1/messages",
+		upstreamPath:     "/zen/v1/messages",
+		adaptClaudeTools: true,
 	},
 	"/v1/responses": {
 		upstreamPath: "/zen/v1/responses",
@@ -146,8 +151,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	forwardBody := bodyBytes
+	if ep.adaptClaudeTools {
+		forwardBody = translate.ClaudeRequestToUpstream(bodyBytes)
+	}
 	if ep.needInject {
-		forwardBody = tryInjectReasoning(model, bodyBytes)
+		forwardBody = tryInjectReasoning(model, forwardBody)
 	}
 
 	baseURL := strings.TrimRight(h.cfg.UpstreamBase, "/")

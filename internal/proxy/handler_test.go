@@ -388,12 +388,55 @@ func TestMessagesPassthrough(t *testing.T) {
 	if gotAPIKey != "client-key" {
 		t.Errorf("x-api-key = %q, want client-key", gotAPIKey)
 	}
-	// Body must be forwarded as-is (no Claude→OpenAI translation).
 	if _, ok := gotBody["stream_options"]; ok {
 		t.Errorf("unexpected stream_options injection: %#v", gotBody)
 	}
 	if !strings.Contains(rec.Body.String(), `"type":"message"`) {
 		t.Errorf("expected native Claude response, got: %s", rec.Body.String())
+	}
+}
+
+func TestMessagesRewritesAnthropicTools(t *testing.T) {
+	var gotBody map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+	h := mustNew(t, cfg)
+
+	body := `{
+		"model":"deepseek-v4",
+		"max_tokens":64,
+		"messages":[{"role":"user","content":[{"type":"text","text":"use tool"}]}],
+		"tools":[{"name":"add","description":"add nums","input_schema":{"type":"object","properties":{"a":{"type":"number"}}}}]
+	}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	tools, ok := gotBody["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("upstream tools = %#v", gotBody["tools"])
+	}
+	tool := tools[0].(map[string]interface{})
+	if tool["type"] != "function" {
+		t.Errorf("type = %v, want function", tool["type"])
+	}
+	fn, ok := tool["function"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("function missing: %#v", tool)
+	}
+	if fn["name"] != "add" {
+		t.Errorf("function.name = %v, want add (this is the missing-field error root cause)", fn["name"])
 	}
 }
 
