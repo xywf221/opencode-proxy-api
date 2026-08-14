@@ -32,6 +32,11 @@ type Config struct {
 	// Supported schemes: http, https, socks5, socks5h.
 	// Example: socks5://127.0.0.1:1080, http://user:pass@127.0.0.1:8080
 	ProxyURL string
+
+	// ForceIPv6 forces IPv6-only resolution when ProxyURL uses socks5 (local resolve).
+	// Has no effect on socks5h (remote resolve) or http/https proxies.
+	// Set via OPCODE_FORCE_IPV6=true.
+	ForceIPv6 bool
 }
 
 func parseModelList(raw string) map[string]struct{} {
@@ -77,6 +82,21 @@ func Load() *Config {
 		}
 	}
 
+	proxyURL := strings.TrimSpace(os.Getenv("OPCODE_PROXY"))
+	forceIPv6 := parseBool(os.Getenv("OPCODE_FORCE_IPV6"))
+
+	if forceIPv6 {
+		// The flag only bites where this process resolves DNS itself. Warn
+		// loudly rather than let it look effective when it cannot be.
+		log := slog.With("component", "config")
+		switch proxyScheme(proxyURL) {
+		case "socks5h":
+			log.Warn("OPCODE_FORCE_IPV6 has no effect with socks5h: the proxy resolves DNS and picks the address family. Use socks5:// to force IPv6 locally, or set the proxy's own IPv6 preference")
+		case "http", "https":
+			log.Warn("OPCODE_FORCE_IPV6 has no effect with an http/https proxy: the proxy resolves DNS and picks the address family")
+		}
+	}
+
 	return &Config{
 		ListenAddr:      listen,
 		APIKey:          apiKey,
@@ -84,8 +104,30 @@ func Load() *Config {
 		UpstreamBase:    base,
 		UpstreamToken:   token,
 		UpstreamTimeout: timeout,
-		ProxyURL:        strings.TrimSpace(os.Getenv("OPCODE_PROXY")),
+		ProxyURL:        proxyURL,
+		ForceIPv6:       forceIPv6,
 	}
+}
+
+// parseBool accepts the usual truthy spellings for env-var flags.
+func parseBool(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// proxyScheme returns the lowercased scheme of proxyURL, or "" if absent.
+func proxyScheme(proxyURL string) string {
+	if proxyURL == "" {
+		return ""
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme)
 }
 
 func (c *Config) IsModelAllowed(model string) bool {
@@ -96,15 +138,44 @@ func (c *Config) IsModelAllowed(model string) bool {
 	return ok
 }
 
+// RedactProxyURL returns proxyURL with any userinfo credentials masked, for
+// safe logging. Unparseable input is reported as "<invalid proxy url>" rather
+// than echoed, since it may still contain a password.
+func RedactProxyURL(proxyURL string) string {
+	if proxyURL == "" {
+		return ""
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return "<invalid proxy url>"
+	}
+	if u.User == nil {
+		return u.String()
+	}
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		return u.String()
+	}
+	// Build the string manually: url.String() percent-encodes userinfo, which
+	// would render the mask as %2A%2A%2A.
+	rest := u.User.Username() + ":***@" + u.Host + u.EscapedPath()
+	if u.RawQuery != "" {
+		rest += "?" + u.RawQuery
+	}
+	if u.Scheme == "" {
+		return rest
+	}
+	return u.Scheme + "://" + rest
+}
+
 // NewUpstreamClient builds an HTTP client for upstream requests.
 // When ProxyURL is set, supports http, https, socks5, and socks5h proxies.
 // socks5 resolves DNS locally; socks5h resolves DNS on the proxy host.
 func (c *Config) NewUpstreamClient() (*http.Client, error) {
-	return newHTTPClient(c.UpstreamTimeout, c.ProxyURL)
+	return newHTTPClient(c.UpstreamTimeout, c.ProxyURL, c.ForceIPv6)
 }
 
-func newHTTPClient(timeout time.Duration, proxyURL string) (*http.Client, error) {
-	transport, err := newTransport(proxyURL)
+func newHTTPClient(timeout time.Duration, proxyURL string, forceIPv6 bool) (*http.Client, error) {
+	transport, err := newTransport(proxyURL, forceIPv6)
 	if err != nil {
 		return nil, err
 	}
@@ -114,9 +185,18 @@ func newHTTPClient(timeout time.Duration, proxyURL string) (*http.Client, error)
 	}, nil
 }
 
-func newTransport(proxyURL string) (http.RoundTripper, error) {
+func newTransport(proxyURL string, forceIPv6 bool) (http.RoundTripper, error) {
 	if proxyURL == "" {
-		return http.DefaultTransport, nil
+		if !forceIPv6 {
+			return http.DefaultTransport, nil
+		}
+		// Direct connections: ask the resolver for IPv6 only.
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return d.DialContext(ctx, "tcp6", addr)
+		}
+		return t, nil
 	}
 
 	u, err := url.Parse(proxyURL)
@@ -151,7 +231,7 @@ func newTransport(proxyURL string) (http.RoundTripper, error) {
 		dialer := proxy.Dialer(base)
 		if scheme == "socks5" {
 			// Local DNS resolution, then dial resolved IP through the proxy.
-			dialer = &localResolveDialer{Dialer: base}
+			dialer = &localResolveDialer{Dialer: base, forceIPv6: forceIPv6}
 		}
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		t.Proxy = nil
@@ -163,24 +243,83 @@ func newTransport(proxyURL string) (http.RoundTripper, error) {
 	}
 }
 
-// localResolveDialer resolves the hostname locally before dialing through the proxy.
+// localResolveDialer resolves the hostname locally before dialing through the
+// proxy. Every resolved address is tried in order, so one dead address family
+// does not fail the request.
 type localResolveDialer struct {
 	proxy.Dialer
+
+	// forceIPv6 drops IPv4 candidates, failing rather than falling back.
+	forceIPv6 bool
 }
 
 func (d *localResolveDialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
+}
+
+func (d *localResolveDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
 	}
-	ips, err := net.LookupIP(host)
+
+	// An address that is already a literal IP needs no lookup.
+	if ip := net.ParseIP(host); ip != nil {
+		if d.forceIPv6 && ip.To4() != nil {
+			return nil, fmt.Errorf("OPCODE_FORCE_IPV6 is set but %q is an IPv4 literal", host)
+		}
+		return d.dialOne(ctx, network, address)
+	}
+
+	resolver := net.DefaultResolver
+	lookupNet := "ip"
+	if d.forceIPv6 {
+		lookupNet = "ip6"
+	}
+	addrs, err := resolver.LookupIP(ctx, lookupNet, host)
 	if err != nil {
+		if d.forceIPv6 {
+			return nil, fmt.Errorf("no AAAA record for host %q (OPCODE_FORCE_IPV6 is set): %w", host, err)
+		}
 		return nil, err
 	}
-	if len(ips) == 0 {
+	if len(addrs) == 0 {
+		if d.forceIPv6 {
+			return nil, fmt.Errorf("no AAAA record for host %q (OPCODE_FORCE_IPV6 is set)", host)
+		}
 		return nil, fmt.Errorf("no IPs found for host %q", host)
 	}
-	return d.Dialer.Dial(network, net.JoinHostPort(ips[0].String(), port))
+
+	// Log the resolved addresses so users can verify forceIPv6 is working.
+	slog.With("component", "proxy").Info("resolved host",
+		"host", host,
+		"addrs", addrs,
+		"force_ipv6", d.forceIPv6,
+	)
+
+	var firstErr error
+	for _, ip := range addrs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := d.dialOne(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, fmt.Errorf("all %d addresses for %q failed: %w", len(addrs), host, firstErr)
+}
+
+// dialOne dials a single resolved address, honoring ctx if the underlying
+// dialer supports it.
+func (d *localResolveDialer) dialOne(ctx context.Context, network, address string) (net.Conn, error) {
+	if cd, ok := d.Dialer.(proxy.ContextDialer); ok {
+		return cd.DialContext(ctx, network, address)
+	}
+	return d.Dialer.Dial(network, address)
 }
 
 func dialContextFromDialer(d proxy.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {

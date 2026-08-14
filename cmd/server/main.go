@@ -155,7 +155,7 @@ func main() {
 
 	proxyMode := "direct"
 	if cfg.ProxyURL != "" {
-		proxyMode = cfg.ProxyURL
+		proxyMode = config.RedactProxyURL(cfg.ProxyURL)
 	}
 
 	log.Info("server starting",

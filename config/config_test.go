@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,7 +144,7 @@ func TestNewTransport(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rt, err := newTransport(tc.proxy)
+			rt, err := newTransport(tc.proxy, false)
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("newTransport(%q) expected error, got nil", tc.proxy)
@@ -158,6 +159,43 @@ func TestNewTransport(t *testing.T) {
 				t.Errorf("newTransport(%q) returned nil transport", tc.proxy)
 			}
 		})
+	}
+}
+
+func TestRedactProxyURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"no credentials", "socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"},
+		{"user and password", "socks5h://grok:secret@1.2.3.4:7890", "socks5h://grok:***@1.2.3.4:7890"},
+		{"user only", "http://grok@1.2.3.4:8080", "http://grok@1.2.3.4:8080"},
+		{"empty password still masked", "socks5://grok:@1.2.3.4:1080", "socks5://grok:***@1.2.3.4:1080"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactProxyURL(tc.in)
+			if got != tc.want {
+				t.Errorf("RedactProxyURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactProxyURLNeverLeaksPassword(t *testing.T) {
+	const password = "KQgYTkbMU3Mj3vJe"
+	inputs := []string{
+		"socks5h://grok:" + password + "@103.79.76.229:7890",
+		"http://grok:" + password + "@1.2.3.4:8080",
+		// Unparseable input must be reported, not echoed.
+		"socks5://grok:" + password + "@ho st:1080/\x7f",
+	}
+	for _, in := range inputs {
+		if got := RedactProxyURL(in); strings.Contains(got, password) {
+			t.Errorf("RedactProxyURL(%q) leaked the password: %q", in, got)
+		}
 	}
 }
 

@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xywf221/opencode-proxy-api/config"
 	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
@@ -24,6 +28,9 @@ type endpointConfig struct {
 	// adaptClaudeTools rewrites Anthropic tools/tool_use for upstream,
 	// which still validates tools as OpenAI function tools.
 	adaptClaudeTools bool
+	// rewriteDSML converts DeepSeek DSML tool-call text in Claude
+	// responses into proper tool_use blocks (stream + non-stream).
+	rewriteDSML bool
 }
 
 var endpoints = map[string]endpointConfig{
@@ -34,6 +41,7 @@ var endpoints = map[string]endpointConfig{
 	"/v1/messages": {
 		upstreamPath:     "/zen/v1/messages",
 		adaptClaudeTools: true,
+		rewriteDSML:      true,
 	},
 	"/v1/responses": {
 		upstreamPath: "/zen/v1/responses",
@@ -161,7 +169,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	baseURL := strings.TrimRight(h.cfg.UpstreamBase, "/")
 	upstreamURL := baseURL + ep.upstreamPath
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
+	trace := &connTrace{}
+	upstreamCtx := httptrace.WithClientTrace(r.Context(), trace.clientTrace())
+
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
 		log.Error("failed to create upstream request", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to create upstream request", "server_error")
@@ -181,7 +192,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.upstream.Do(upstreamReq)
 	if err != nil {
-		log.Error("upstream request failed", "error", err, "upstream", upstreamURL)
+		log.Error("upstream request failed",
+			append([]any{"error", err, "upstream", upstreamURL}, trace.logArgs()...)...)
 		writeJSONError(w, http.StatusBadGateway, "upstream request failed", "server_error")
 		return
 	}
@@ -189,8 +201,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(start)
 
-	if isStream {
-		log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
+	// DSML rewrite needs the full body (including streams): free DeepSeek
+	// often streams tool calls as text deltas that only parse once complete.
+	if isStream && !ep.rewriteDSML {
+		logArgs := append([]any{"status", resp.StatusCode, "duration", elapsed.String()}, trace.logArgs()...)
+
+		// Error responses are small JSON, not a stream: buffer them so the
+		// upstream error type reaches the log, then forward unchanged.
+		if resp.StatusCode >= 400 {
+			errBody, readErr := readUpstreamBody(resp.Body)
+			if readErr != nil {
+				log.Error("failed to read upstream error response",
+					append(logArgs, "error", readErr)...)
+				writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
+				return
+			}
+			log.Warn("upstream error", append(logArgs, "body", truncateBody(errBody))...)
+			forwardHeaders(w, resp)
+			w.WriteHeader(resp.StatusCode)
+			if _, err := w.Write(errBody); err != nil {
+				log.Debug("response write error", "error", err)
+			}
+			return
+		}
+
+		log.Info("upstream", logArgs...)
 		forwardHeaders(w, resp)
 		if w.Header().Get("Content-Type") == "" {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -208,8 +243,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
 		return
 	}
-	log.Info("upstream", "status", resp.StatusCode, "duration", elapsed.String())
+	if ep.rewriteDSML && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if isStream {
+			out = translate.RewriteClaudeStreamDSML(out)
+		} else {
+			out = translate.RewriteClaudeMessageDSML(out)
+		}
+	}
+	logArgs := append([]any{"status", resp.StatusCode, "duration", elapsed.String()}, trace.logArgs()...)
+	if resp.StatusCode >= 400 {
+		log.Warn("upstream error", append(logArgs, "body", truncateBody(out))...)
+	} else {
+		log.Info("upstream", logArgs...)
+	}
 	forwardHeaders(w, resp)
+	if isStream && w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(out); err != nil {
 		log.Debug("response write error", "error", err)
@@ -278,6 +328,113 @@ func tryInjectReasoning(model string, body []byte) []byte {
 		return body
 	}
 	return modifiedBytes
+}
+
+// connTrace captures the remote address of the TCP connection used for an
+// upstream request. When OPCODE_PROXY is set this is the proxy's address, not
+// the upstream host: the proxy's own outbound hop is not observable from here.
+type connTrace struct {
+	mu sync.Mutex
+
+	// remoteAddr is the peer we connected to (upstream host, or the proxy).
+	remoteAddr string
+	// network is "tcp4" or "tcp6" as reported by the connection.
+	network string
+	// reused reports whether the connection came from the idle pool, in which
+	// case no fresh DNS or dial happened for this request.
+	reused bool
+	// dnsHost is the name looked up, and dnsAddrs the resolved candidates.
+	// Empty when the transport dialed without a DNS step (proxy, or cache hit).
+	dnsHost  string
+	dnsAddrs []string
+}
+
+// clientTrace returns a httptrace.ClientTrace that records connection details
+// into t. The returned trace is safe for the concurrent callbacks httptrace makes.
+func (t *connTrace) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.dnsHost = info.Host
+		},
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.dnsAddrs = make([]string, 0, len(info.Addrs))
+			for _, a := range info.Addrs {
+				t.dnsAddrs = append(t.dnsAddrs, a.IP.String())
+			}
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.reused = info.Reused
+			if info.Conn == nil {
+				return
+			}
+			if ra := info.Conn.RemoteAddr(); ra != nil {
+				t.remoteAddr = ra.String()
+				t.network = ra.Network()
+			}
+		},
+	}
+}
+
+// logArgs returns slog key/value pairs describing the connection. Keys are
+// omitted when the corresponding step did not happen.
+func (t *connTrace) logArgs() []any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	args := make([]any, 0, 10)
+	if t.remoteAddr == "" {
+		return args
+	}
+	args = append(args, "remote_addr", t.remoteAddr)
+
+	// Prefer the address family of the actual peer IP over conn.Network(),
+	// which reports "tcp" for dual-stack listeners on most platforms.
+	if host, _, err := net.SplitHostPort(t.remoteAddr); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.To4() != nil {
+				args = append(args, "remote_family", "ipv4")
+			} else {
+				args = append(args, "remote_family", "ipv6")
+			}
+		}
+	} else if t.network != "" {
+		args = append(args, "remote_network", t.network)
+	}
+
+	if t.reused {
+		// No DNS or dial happened; remote_addr comes from the pooled conn.
+		args = append(args, "conn_reused", true)
+	}
+	if t.dnsHost != "" {
+		args = append(args, "dns_host", t.dnsHost)
+	}
+	if len(t.dnsAddrs) > 0 {
+		args = append(args, "dns_addrs", strings.Join(t.dnsAddrs, ","))
+	}
+	return args
+}
+
+// maxErrorBodyLog caps how much of a failed upstream body reaches the log.
+const maxErrorBodyLog = 512
+
+// truncateBody trims b to a rune-safe prefix suitable for logging.
+func truncateBody(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) <= maxErrorBodyLog {
+		return s
+	}
+	cut := s[:maxErrorBodyLog]
+	// Avoid emitting a partial multi-byte rune at the cut point.
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "...(truncated)"
 }
 
 const maxUpstreamBodySize = 50 << 20 // 50 MB

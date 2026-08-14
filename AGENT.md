@@ -13,6 +13,7 @@ Standalone Go proxy for opencode.ai. Exposes three API formats (OpenAI Chat Comp
 | `build.sh` / `build.cmd` | Cross-compile helpers; default package `./cmd/server`, binary name `opencode-proxy` |
 | `internal/proxy/handler.go` | HTTP handler. CORS, auth, model filtering, passthrough routing to upstream |
 | `internal/translate/claude_request.go` | Request-only adapter for `/v1/messages`: Anthropic tools/tool_use → OpenAI function tools (upstream still validates OpenAI tool schema) |
+| `internal/translate/dsml.go` | Response adapter for `/v1/messages`: DeepSeek DSML tool-call text → Claude `tool_use` (non-stream + buffered stream) |
 | `internal/reasoning/inject.go` | Injects `reasoning_content: " "` placeholder for DeepSeek/Kimi models on chat/completions only |
 
 ## Architecture
@@ -25,7 +26,8 @@ Client ──► /v1/responses ──► (passthrough) ──► opencode.ai /ze
 
 ## Notes
 
-- Responses are passthrough. `/v1/messages` request body gets a narrow tools/tool_use rewrite because upstream still validates `tools[].function.name` (OpenAI shape) even on `/zen/v1/messages`.
+- `/v1/messages` request body gets a narrow tools/tool_use rewrite because upstream still validates `tools[].function.name` (OpenAI shape) even on `/zen/v1/messages`.
+- `/v1/messages` responses rewrite DeepSeek DSML tool-call text into Claude `tool_use` blocks. Streaming responses are buffered so DSML can be parsed as a whole.
 - For `/v1/messages`, prefer Anthropic content blocks (`content: [{"type":"text","text":"..."}]`); plain string content can fail upstream with "Messages cannot be empty".
 - `anthropic-version` and client `x-api-key` headers are forwarded on `/v1/messages`.
 - Reasoning injection only applies to `/v1/chat/completions`.

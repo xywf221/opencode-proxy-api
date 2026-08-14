@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xywf221/opencode-proxy-api/config"
 )
@@ -309,6 +312,106 @@ func TestNonStreamingPassthrough(t *testing.T) {
 	}
 }
 
+func TestStreamingErrorForwardedUnchanged(t *testing.T) {
+	// Upstream rejects with a non-stream JSON error even though the client
+	// asked for stream:true. The body must reach the client intact.
+	const errBody = `{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded."}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(errBody))
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+
+	h := mustNew(t, cfg)
+	body := `{"model":"deepseek-v4","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", rec.Code)
+	}
+	if got := rec.Body.String(); got != errBody {
+		t.Errorf("body = %q, want %q", got, errBody)
+	}
+	// An error must not be mislabeled as a stream.
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, error should not be labeled as a stream", ct)
+	}
+}
+
+func TestTruncateBody(t *testing.T) {
+	if got := truncateBody([]byte("  hi  ")); got != "hi" {
+		t.Errorf("truncateBody(%q) = %q, want %q", "  hi  ", got, "hi")
+	}
+
+	long := strings.Repeat("a", maxErrorBodyLog+50)
+	got := truncateBody([]byte(long))
+	if !strings.HasSuffix(got, "...(truncated)") {
+		t.Errorf("long body should be marked truncated, got %q", got)
+	}
+	if len(got) > maxErrorBodyLog+len("...(truncated)") {
+		t.Errorf("truncated body too long: %d bytes", len(got))
+	}
+
+	// A cut landing mid-rune must not emit invalid UTF-8.
+	multi := strings.Repeat("界", maxErrorBodyLog) // 3 bytes per rune
+	if got := truncateBody([]byte(multi)); !utf8.ValidString(got) {
+		t.Error("truncateBody produced invalid UTF-8")
+	}
+}
+
+func TestConnTraceRecordsRemoteAddr(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1"}`))
+	}))
+	defer upstream.Close()
+
+	trace := &connTrace{}
+	req, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), trace.clientTrace()),
+		http.MethodGet, upstream.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	args := trace.logArgs()
+	pairs := map[string]any{}
+	for i := 0; i+1 < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if !ok {
+			t.Fatalf("logArgs key %v is not a string", args[i])
+		}
+		pairs[key] = args[i+1]
+	}
+
+	// httptest listens on loopback, so the family is known.
+	if pairs["remote_addr"] == nil {
+		t.Error("remote_addr not recorded")
+	}
+	if fam := pairs["remote_family"]; fam != "ipv4" && fam != "ipv6" {
+		t.Errorf("remote_family = %v, want ipv4 or ipv6", fam)
+	}
+}
+
+func TestConnTraceEmptyWhenNoConn(t *testing.T) {
+	// A request that never connects must not emit half-filled fields.
+	if args := (&connTrace{}).logArgs(); len(args) != 0 {
+		t.Errorf("logArgs() = %v, want empty when no connection was made", args)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -393,6 +496,102 @@ func TestMessagesPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"type":"message"`) {
 		t.Errorf("expected native Claude response, got: %s", rec.Body.String())
+	}
+}
+
+func TestMessagesRewritesDSMLResponse(t *testing.T) {
+	dsml := "hi\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"Bash\">\n" +
+		"<｜｜DSML｜｜parameter name=\"command\" string=\"true\">ls -la</｜｜DSML｜｜parameter>\n" +
+		"</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
+	upstreamBody, _ := json.Marshal(map[string]interface{}{
+		"id":          "msg_dsml",
+		"type":        "message",
+		"role":        "assistant",
+		"model":       "deepseek-v4-flash-free",
+		"content":     []interface{}{map[string]interface{}{"type": "text", "text": dsml}},
+		"stop_reason": "end_turn",
+		"usage":       map[string]interface{}{"input_tokens": 1, "output_tokens": 2},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+	h := mustNew(t, cfg)
+
+	body := `{"model":"deepseek-v4","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"scan"}]}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var msg map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg["stop_reason"] != "tool_use" {
+		t.Errorf("stop_reason = %v, want tool_use; body=%s", msg["stop_reason"], rec.Body.String())
+	}
+	content, _ := msg["content"].([]interface{})
+	found := false
+	for _, c := range content {
+		b, _ := c.(map[string]interface{})
+		if b["type"] == "tool_use" && b["name"] == "Bash" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected tool_use Bash in content: %#v", content)
+	}
+	if strings.Contains(rec.Body.String(), "DSML") {
+		t.Errorf("DSML should be stripped: %s", rec.Body.String())
+	}
+}
+
+func TestMessagesRewritesDSMLStream(t *testing.T) {
+	stream := "" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s\",\"model\":\"deepseek-v4-flash-free\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<｜DSML｜tool_calls>\\n<｜DSML｜invoke name=\\\"Bash\\\">\\n<｜DSML｜parameter name=\\\"command\\\" string=\\\"true\\\">echo hi</｜DSML｜parameter>\\n</｜DSML｜invoke>\\n</｜DSML｜tool_calls>\"}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(stream))
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+	h := mustNew(t, cfg)
+
+	body := `{"model":"deepseek-v4","stream":true,"max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"tool_use"`) {
+		t.Fatalf("expected rewritten tool_use stream, got: %s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"tool_use"`) {
+		t.Errorf("expected stop_reason tool_use, got: %s", out)
+	}
+	if strings.Contains(out, "DSML") {
+		t.Errorf("DSML leaked into stream: %s", out)
+	}
+	if !strings.Contains(out, "echo hi") {
+		t.Errorf("missing tool input in stream: %s", out)
 	}
 }
 
