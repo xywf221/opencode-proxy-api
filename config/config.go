@@ -90,6 +90,11 @@ func Load() *Config {
 	proxyPoolFile := strings.TrimSpace(os.Getenv("OPCODE_PROXY_POOL_FILE"))
 	forceIPv6 := parseBool(os.Getenv("OPCODE_FORCE_IPV6"))
 
+	// If single proxy is specified but no pool file, treat it as a single-entry pool
+	if proxyURL != "" && proxyPoolFile == "" {
+		proxyPoolFile = "<inline-single-proxy>"
+	}
+
 	if forceIPv6 {
 		// The flag only bites where this process resolves DNS itself. Warn
 		// loudly rather than let it look effective when it cannot be.

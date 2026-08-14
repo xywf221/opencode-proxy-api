@@ -22,7 +22,7 @@ http://proxy3:3128
 		t.Fatal(err)
 	}
 
-	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false)
+	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false, "")
 	if err != nil {
 		t.Fatalf("LoadProxyPool failed: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestProxyPoolRotate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false)
+	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestProxyPoolRotate(t *testing.T) {
 
 func TestLoadProxyPoolEmpty(t *testing.T) {
 	// Empty file path returns nil
-	pool, err := LoadProxyPool("", 5*time.Minute, false)
+	pool, err := LoadProxyPool("", 5*time.Minute, false, "")
 	if err != nil {
 		t.Errorf("expected no error for empty path, got %v", err)
 	}
@@ -94,7 +94,7 @@ func TestLoadProxyPoolNoValidProxies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false)
+	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false, "")
 	if err == nil {
 		t.Error("expected error for file with no valid proxies")
 	}
@@ -115,7 +115,7 @@ socks5://valid2:1080
 		t.Fatal(err)
 	}
 
-	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false)
+	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false, "")
 	if err != nil {
 		t.Fatalf("LoadProxyPool failed: %v", err)
 	}
@@ -123,5 +123,41 @@ socks5://valid2:1080
 	// Should skip invalid lines and load only the 2 valid ones
 	if len(pool.proxies) != 2 {
 		t.Errorf("expected 2 valid proxies, got %d", len(pool.proxies))
+	}
+}
+
+func TestLoadProxyPoolInlineSingle(t *testing.T) {
+	// Test inline single proxy (OPCODE_PROXY without file)
+	pool, err := LoadProxyPool("<inline-single-proxy>", 5*time.Minute, false, "http://single-proxy:8080")
+	if err != nil {
+		t.Fatalf("LoadProxyPool inline failed: %v", err)
+	}
+	if pool == nil {
+		t.Fatal("expected non-nil pool for inline proxy")
+	}
+
+	// Should have exactly 1 proxy
+	if len(pool.proxies) != 1 {
+		t.Errorf("expected 1 proxy, got %d", len(pool.proxies))
+	}
+
+	if got := pool.Current(); got != "http://single-proxy:8080" {
+		t.Errorf("expected http://single-proxy:8080, got %s", got)
+	}
+
+	// Rotate should wrap back to the same proxy
+	if got := pool.Rotate(); got != "http://single-proxy:8080" {
+		t.Errorf("rotate should wrap to same proxy, got %s", got)
+	}
+}
+
+func TestLoadProxyPoolInlineSingleEmpty(t *testing.T) {
+	// Inline marker with empty proxy should return nil
+	pool, err := LoadProxyPool("<inline-single-proxy>", 5*time.Minute, false, "")
+	if err != nil {
+		t.Errorf("expected no error for empty inline proxy, got %v", err)
+	}
+	if pool != nil {
+		t.Error("expected nil pool for empty inline proxy")
 	}
 }

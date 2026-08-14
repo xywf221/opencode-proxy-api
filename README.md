@@ -93,7 +93,10 @@ OPCODE_FORCE_IPV6=true OPCODE_PROXY=socks5://127.0.0.1:1080 ./opencode-proxy
 When upstream returns 429 (rate limit), automatically rotate to the next proxy:
 
 ```bash
-# Create a proxy list file (one proxy per line)
+# Single proxy (also gets automatic 429 handling)
+OPCODE_PROXY=http://proxy.example.com:8080 ./opencode-proxy
+
+# Or create a proxy list file (one proxy per line)
 cat > proxies.txt <<EOF
 http://user1:pass1@proxy1.example.com:8080
 http://user2:pass2@proxy2.example.com:8080
@@ -105,13 +108,13 @@ OPCODE_PROXY_POOL_FILE=proxies.txt ./opencode-proxy
 ```
 
 Features:
-- **Automatic rotation** — switches to the next proxy on 429 responses
+- **Automatic rotation** — switches to the next proxy on 429 responses (works with both single proxy and pool file)
 - **Round-robin** — cycles back to the first proxy after the last one
 - **Flexible formats** — supports `http://`, `https://`, `socks5://`, `socks5h://`
-- **Skips invalid lines** — ignores comments (`#`), empty lines, and malformed URLs
+- **Skips invalid lines** — ignores comments (`#`), empty lines, and malformed URLs (pool file only)
 - **Works with `OPCODE_FORCE_IPV6`** — when both are set, each proxy uses IPv6-only DNS
 
-**Note**: `OPCODE_PROXY` and `OPCODE_PROXY_POOL_FILE` are mutually exclusive. Use only one.
+**Note**: When `OPCODE_PROXY_POOL_FILE` is set, it takes precedence over `OPCODE_PROXY`.
 
 ## CI
 

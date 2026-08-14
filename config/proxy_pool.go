@@ -27,10 +27,29 @@ type ProxyPool struct {
 // a ProxyPool initialized to the first proxy. Empty lines and lines starting
 // with # are ignored. Returns nil if filePath is empty or the file contains
 // no valid proxies.
-func LoadProxyPool(filePath string, timeout time.Duration, forceIPv6 bool) (*ProxyPool, error) {
+//
+// Special case: if filePath is "<inline-single-proxy>", inlineProxy must be
+// provided and is used as a single-element pool (for OPCODE_PROXY without a file).
+func LoadProxyPool(filePath string, timeout time.Duration, forceIPv6 bool, inlineProxy string) (*ProxyPool, error) {
 	if filePath == "" {
 		return nil, nil
 	}
+
+	// Handle single inline proxy (OPCODE_PROXY without OPCODE_PROXY_POOL_FILE)
+	if filePath == "<inline-single-proxy>" {
+		if inlineProxy == "" {
+			return nil, nil
+		}
+		slog.Info("using single proxy as pool",
+			"proxy", RedactProxyURL(inlineProxy))
+		return &ProxyPool{
+			proxies:   []string{inlineProxy},
+			current:   0,
+			forceIPv6: forceIPv6,
+			timeout:   timeout,
+		}, nil
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open proxy pool file: %w", err)

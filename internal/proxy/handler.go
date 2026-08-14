@@ -64,15 +64,20 @@ func New(cfg *config.Config) (*Handler, error) {
 	var err error
 
 	if cfg.ProxyPoolFile != "" {
-		pool, err = config.LoadProxyPool(cfg.ProxyPoolFile, cfg.UpstreamTimeout, cfg.ForceIPv6)
+		pool, err = config.LoadProxyPool(cfg.ProxyPoolFile, cfg.UpstreamTimeout, cfg.ForceIPv6, cfg.ProxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("load proxy pool: %w", err)
 		}
-		client, err = pool.NewClient()
-		if err != nil {
-			return nil, fmt.Errorf("create client from proxy pool: %w", err)
+		if pool != nil {
+			client, err = pool.NewClient()
+			if err != nil {
+				return nil, fmt.Errorf("create client from proxy pool: %w", err)
+			}
 		}
-	} else {
+	}
+
+	// Fallback to direct client if no pool was created
+	if client == nil {
 		client, err = cfg.NewUpstreamClient()
 		if err != nil {
 			return nil, fmt.Errorf("upstream client: %w", err)
