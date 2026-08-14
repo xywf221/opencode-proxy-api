@@ -31,12 +31,16 @@ type endpointConfig struct {
 	// rewriteDSML converts DeepSeek DSML tool-call text in Claude
 	// responses into proper tool_use blocks (stream + non-stream).
 	rewriteDSML bool
+	// normalizeChatRoles rewrites OpenAI Chat Completions roles
+	// (e.g. developer -> system) for upstream compatibility.
+	normalizeChatRoles bool
 }
 
 var endpoints = map[string]endpointConfig{
 	"/v1/chat/completions": {
-		upstreamPath: "/zen/v1/chat/completions",
-		needInject:   true,
+		upstreamPath:       "/zen/v1/chat/completions",
+		needInject:         true,
+		normalizeChatRoles: true,
 	},
 	"/v1/messages": {
 		upstreamPath:     "/zen/v1/messages",
@@ -186,6 +190,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	forwardBody := bodyBytes
+	if ep.normalizeChatRoles {
+		forwardBody = translate.NormalizeChatCompletionRequest(forwardBody)
+	}
 	if ep.adaptClaudeTools {
 		forwardBody = translate.ClaudeRequestToUpstream(bodyBytes)
 	}
