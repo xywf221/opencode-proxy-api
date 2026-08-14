@@ -51,16 +51,38 @@ var endpoints = map[string]endpointConfig{
 type Handler struct {
 	cfg      *config.Config
 	upstream *http.Client
+
+	// proxyPool is set when OPCODE_PROXY_POOL_FILE is configured.
+	// When non-nil, 429 responses trigger rotation via RotateProxy().
+	proxyPool *config.ProxyPool
+	poolMu    sync.Mutex // Protects upstream client during rotation
 }
 
 func New(cfg *config.Config) (*Handler, error) {
-	client, err := cfg.NewUpstreamClient()
-	if err != nil {
-		return nil, fmt.Errorf("upstream client: %w", err)
+	var pool *config.ProxyPool
+	var client *http.Client
+	var err error
+
+	if cfg.ProxyPoolFile != "" {
+		pool, err = config.LoadProxyPool(cfg.ProxyPoolFile, cfg.UpstreamTimeout, cfg.ForceIPv6)
+		if err != nil {
+			return nil, fmt.Errorf("load proxy pool: %w", err)
+		}
+		client, err = pool.NewClient()
+		if err != nil {
+			return nil, fmt.Errorf("create client from proxy pool: %w", err)
+		}
+	} else {
+		client, err = cfg.NewUpstreamClient()
+		if err != nil {
+			return nil, fmt.Errorf("upstream client: %w", err)
+		}
 	}
+
 	return &Handler{
-		cfg:      cfg,
-		upstream: client,
+		cfg:       cfg,
+		upstream:  client,
+		proxyPool: pool,
 	}, nil
 }
 
@@ -217,6 +239,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			log.Warn("upstream error", append(logArgs, "body", truncateBody(errBody))...)
+
+			// Rotate proxy on 429 if pool is configured
+			if resp.StatusCode == http.StatusTooManyRequests && h.proxyPool != nil {
+				h.rotateProxy()
+			}
+
 			forwardHeaders(w, resp)
 			w.WriteHeader(resp.StatusCode)
 			if _, err := w.Write(errBody); err != nil {
@@ -253,6 +281,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logArgs := append([]any{"status", resp.StatusCode, "duration", elapsed.String()}, trace.logArgs()...)
 	if resp.StatusCode >= 400 {
 		log.Warn("upstream error", append(logArgs, "body", truncateBody(out))...)
+
+		// Rotate proxy on 429 if pool is configured
+		if resp.StatusCode == http.StatusTooManyRequests && h.proxyPool != nil {
+			h.rotateProxy()
+		}
 	} else {
 		log.Info("upstream", logArgs...)
 	}
@@ -328,6 +361,22 @@ func tryInjectReasoning(model string, body []byte) []byte {
 		return body
 	}
 	return modifiedBytes
+}
+
+// rotateProxy advances to the next proxy in the pool and rebuilds the HTTP client.
+// Called when a 429 response is received and proxyPool is configured.
+func (h *Handler) rotateProxy() {
+	h.poolMu.Lock()
+	defer h.poolMu.Unlock()
+
+	newProxy := h.proxyPool.Rotate()
+	client, err := h.proxyPool.NewClient()
+	if err != nil {
+		slog.With("component", "proxy").Error("failed to rotate proxy",
+			"proxy", config.RedactProxyURL(newProxy), "error", err)
+		return
+	}
+	h.upstream = client
 }
 
 // connTrace captures the remote address of the TCP connection used for an

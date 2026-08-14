@@ -33,6 +33,10 @@ type Config struct {
 	// Example: socks5://127.0.0.1:1080, http://user:pass@127.0.0.1:8080
 	ProxyURL string
 
+	// ProxyPoolFile is a file containing one proxy URL per line.
+	// When set, the proxy rotates on 429 responses.
+	ProxyPoolFile string
+
 	// ForceIPv6 forces IPv6-only resolution when ProxyURL uses socks5 (local resolve).
 	// Has no effect on socks5h (remote resolve) or http/https proxies.
 	// Set via OPCODE_FORCE_IPV6=true.
@@ -83,6 +87,7 @@ func Load() *Config {
 	}
 
 	proxyURL := strings.TrimSpace(os.Getenv("OPCODE_PROXY"))
+	proxyPoolFile := strings.TrimSpace(os.Getenv("OPCODE_PROXY_POOL_FILE"))
 	forceIPv6 := parseBool(os.Getenv("OPCODE_FORCE_IPV6"))
 
 	if forceIPv6 {
@@ -105,6 +110,7 @@ func Load() *Config {
 		UpstreamToken:   token,
 		UpstreamTimeout: timeout,
 		ProxyURL:        proxyURL,
+		ProxyPoolFile:   proxyPoolFile,
 		ForceIPv6:       forceIPv6,
 	}
 }
