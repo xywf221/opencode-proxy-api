@@ -150,3 +150,109 @@ func TestKeepOpenAITools(t *testing.T) {
 		t.Errorf("name lost: %#v", fn)
 	}
 }
+
+func TestSkipToolMessageWithoutCallID(t *testing.T) {
+	input := `{
+		"model": "claude-3-5-sonnet-20241022",
+		"messages": [
+			{"role": "user", "content": "test"},
+			{"role": "assistant", "content": "response"},
+			{"role": "tool", "content": "result1", "tool_call_id": ""},
+			{"role": "tool", "content": "result2"}
+		]
+	}`
+
+	out := ClaudeRequestToUpstream([]byte(input))
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("Failed to unmarshal result: %v", err)
+	}
+
+	messages := result["messages"].([]interface{})
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages (tool messages kept with generated IDs), got %d", len(messages))
+	}
+
+	// Tool messages must have a non-empty tool_call_id after rewrite.
+	for i := 2; i < 4; i++ {
+		msg := messages[i].(map[string]interface{})
+		if msg["role"] != "tool" {
+			t.Errorf("Expected role=tool, got %v", msg["role"])
+		}
+		if id, _ := msg["tool_call_id"].(string); id == "" {
+			t.Errorf("tool message missing generated tool_call_id: %v", msg)
+		}
+	}
+}
+
+func TestClaudeRequestToUpstream_NeverEmptyMessages(t *testing.T) {
+	// All messages are string-content tool messages without IDs. Previously
+	// these were dropped, emptying the messages array and causing upstream
+	// "Empty input messages". They must now be kept (with generated IDs).
+	input := `{
+		"model": "m",
+		"messages": [
+			{"role": "tool", "content": "r1"},
+			{"role": "tool", "content": "r2"}
+		]
+	}`
+
+	out := ClaudeRequestToUpstream([]byte(input))
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("Failed to unmarshal result: %v", err)
+	}
+
+	messages, ok := result["messages"].([]interface{})
+	if !ok {
+		t.Fatalf("messages missing after rewrite: %s", out)
+	}
+	if len(messages) == 0 {
+		t.Fatalf("messages must not be empty after rewrite: %s", out)
+	}
+}
+
+func TestSkipToolResultWithoutID(t *testing.T) {
+	// Regression test: tool_result blocks without tool_use_id/tool_call_id
+	// should be skipped to avoid upstream validation errors.
+	in := []byte(`{
+		"model":"m",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"add","input":{"a":1}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","content":"result without ID"}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"valid result"}
+			]}
+		]
+	}`)
+	out := ClaudeRequestToUpstream(in)
+	var raw map[string]interface{}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msgs := raw["messages"].([]interface{})
+
+	// Should have: assistant with tool_calls, tool message with valid ID
+	// Should NOT have: tool message without ID
+	toolMsgCount := 0
+	for _, m := range msgs {
+		msg := m.(map[string]interface{})
+		if msg["role"] == "tool" {
+			toolMsgCount++
+			// Verify it has a valid tool_call_id
+			if callID, ok := msg["tool_call_id"].(string); !ok || callID == "" {
+				t.Errorf("tool message has empty tool_call_id: %#v", msg)
+			}
+		}
+	}
+
+	if toolMsgCount != 1 {
+		t.Errorf("expected 1 tool message, got %d; body=%s", toolMsgCount, string(out))
+	}
+}

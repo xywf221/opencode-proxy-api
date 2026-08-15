@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -49,6 +50,85 @@ func mustNew(t *testing.T, cfg *config.Config) *Handler {
 		t.Fatalf("New: %v", err)
 	}
 	return h
+}
+
+func TestRetryOnProxyFailure(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		count := attempts
+		mu.Unlock()
+		// Fail the first two attempts with a network error, succeed on the third.
+		if count < 3 {
+			// Hijack and close to force a client-side read/dial error.
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+
+	cfg := newTestConfig(func(c *config.Config) {
+		c.UpstreamBase = upstream.URL
+	})
+	h := mustNew(t, cfg)
+
+	body := `{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 3 {
+		t.Errorf("upstream attempts = %d, want 3 (2 failed + 1 success)", got)
+	}
+}
+
+func TestRetryExhaustsOnPersistentProxyFailure(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+
+	cfg := newTestConfig(func(c *config.Config) {
+		c.UpstreamBase = upstream.URL
+		c.UpstreamTimeout = 500 * time.Millisecond
+	})
+	h := mustNew(t, cfg)
+
+	body := `{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got == 0 {
+		t.Error("expected at least one upstream attempt")
+	}
 }
 
 func TestNewInvalidProxy(t *testing.T) {

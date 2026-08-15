@@ -1,0 +1,133 @@
+feat: 企业级反代理升级 - 会话亲和性与健康管理
+
+## 核心改进
+
+### 1. 会话亲和性代理选择
+- 使用 FNV-1a 哈希将会话 ID 映射到固定代理
+- 支持多种会话标识提取方式：
+  * HTTP headers (x-session-id, conversation-id)
+  * JSON metadata (session_id, conversation_id)
+  * OpenAI user 字段
+  * 首条消息内容哈希
+- 单代理自动池化，复用健康管理逻辑
+- **效果**: 彻底解决"请求几次被标记"问题
+
+### 2. 请求特征多样化
+- 新增动态 headers:
+  * x-opencode-session: 稳定会话标识
+  * x-opencode-request: 每次唯一 UUID
+  * x-opencode-project: 随机项目名
+- 伪装官方客户端:
+  * User-Agent: opencode/1.4.3
+  * Referer: https://opencode.ai/
+  * X-Title: opencode
+- **效果**: 模拟真实客户端行为，增加请求多样性
+
+### 3. 代理健康度管理
+- 失败追踪与指数退避 (15s → 30s → 60s → 120s)
+- 区分网络错误 vs 业务错误
+- 自动故障隔离与恢复
+- **效果**: 死代理自动排除，降低失败率
+
+### 4. 智能重试策略
+- Retry-After 解析 (支持秒数和 HTTP 日期)
+- 429 自动轮换代理
+- 指数退避与 Retry-After 融合
+- **效果**: 遵守上游限流规则
+
+### 5. 安全改进
+- 代理 URL 自动脱敏 (socks5://***:***@host:port)
+- 日志永不泄漏明文密码
+- **效果**: 生产环境安全合规
+
+### 6. IPv6 兼容性
+- 推荐使用 socks5h:// 避免本地 DNS IPv6 问题
+- 文档详细说明最佳实践
+
+## 新增文件
+
+### 核心实现
+- internal/session/session.go - 会话标识提取与哈希
+- internal/session/session_test.go - 会话测试覆盖
+- internal/retry/retry.go - 重试策略实现
+- internal/retry/retry_test.go - 重试测试覆盖
+- internal/sse/*.go - SSE 转换层 (预备)
+
+### 文档
+- README.md - 完整用户指南 (重写)
+- IMPROVEMENTS.md - 详细改进文档
+- CHANGELOG.md - 版本历史
+- DEPLOYMENT.md - 部署指南
+- SUMMARY.md - 项目总结
+
+### 测试脚本
+- test/test_session_affinity.sh - 会话亲和测试
+- test_quick.sh - 快速验证脚本
+- verify_deployment.sh - 部署验证脚本
+
+## 修改文件
+
+### 核心逻辑
+- config/proxy_pool.go
+  * 会话亲和的 ClientForSession()
+  * 健康度追踪 (ProxyHealth)
+  * 失败分类与冷却管理
+  * 密码脱敏 RedactProxyURL()
+  * 单代理自动池化
+
+- internal/proxy/handler.go
+  * 集成会话标识提取
+  * 使用会话亲和客户端
+  * 区分网络错误 vs 业务错误
+  * 添加请求特征 headers
+  * 遵守 Retry-After
+
+## 测试覆盖
+
+✅ config - 代理池加载、轮换、健康管理
+✅ internal/session - 会话提取、哈希稳定性
+✅ internal/retry - Retry-After 解析、指数退避
+✅ internal/sse - SSE 转换层
+✅ internal/proxy - Handler 集成
+
+所有测试通过: go test ./...
+
+## 参考项目
+
+- opencode2api - 会话亲和架构
+- opencode-free-gate - Gateway 模式
+
+## 破坏性变更
+
+无 - 完全向后兼容
+
+## 使用示例
+
+```bash
+# 推荐配置
+export OPCODE_TOKEN=your-token
+export OPCODE_PROXY=socks5h://user:pass@proxy.com:1080
+
+# 启动服务
+./opencode-proxy-linux-amd64
+
+# 客户端发送请求 (带会话 ID)
+curl -H "x-session-id: my-conversation" \
+  http://localhost:8080/v1/chat/completions ...
+```
+
+## 验证步骤
+
+```bash
+# 1. 运行测试
+go test ./...
+
+# 2. 部署验证
+bash verify_deployment.sh
+
+# 3. 快速测试
+bash test_quick.sh
+```
+
+版本: v1.1.0
+状态: 生产就绪

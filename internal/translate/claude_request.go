@@ -5,6 +5,8 @@ package translate
 
 import (
 	"encoding/json"
+	"fmt"
+	"time"
 )
 
 // ClaudeRequestToUpstream rewrites Anthropic-shaped tools / tool_choice /
@@ -35,6 +37,11 @@ func ClaudeRequestToUpstream(body []byte) []byte {
 
 	if msgsRaw, ok := raw["messages"]; ok {
 		if rewritten, ok := rewriteMessages(msgsRaw); ok {
+			// Safety net: never ship a request whose messages array became
+			// empty, upstream rejects it with "Empty input messages".
+			if messagesEmpty(rewritten) {
+				return body
+			}
 			raw["messages"] = rewritten
 			changed = true
 		}
@@ -170,6 +177,15 @@ func rewriteToolChoice(raw json.RawMessage) (json.RawMessage, bool) {
 	}
 }
 
+// messagesEmpty reports whether raw is a JSON messages array that is empty.
+func messagesEmpty(raw json.RawMessage) bool {
+	var msgs []json.RawMessage
+	if err := json.Unmarshal(raw, &msgs); err != nil {
+		return false
+	}
+	return len(msgs) == 0
+}
+
 func rewriteMessages(raw json.RawMessage) (json.RawMessage, bool) {
 	var msgs []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &msgs); err != nil || len(msgs) == 0 {
@@ -187,6 +203,21 @@ func rewriteMessages(raw json.RawMessage) (json.RawMessage, bool) {
 		// Plain string content — leave alone (upstream sometimes accepts it).
 		var contentStr string
 		if json.Unmarshal(contentRaw, &contentStr) == nil {
+			// Generate a tool_call_id for tool messages missing one, rather
+			// than dropping the message (dropping can empty the messages array
+			// and upstream rejects with "Empty input messages").
+			if role == "tool" {
+				var toolCallID string
+				if tcid, ok := msg["tool_call_id"]; ok {
+					_ = json.Unmarshal(tcid, &toolCallID)
+				}
+				if toolCallID == "" {
+					toolCallID = fmt.Sprintf("call_%d", time.Now().UnixNano())
+					msg["tool_call_id"] = json.RawMessage(`"` + toolCallID + `"`)
+					changed = true
+				}
+			}
+
 			item := map[string]interface{}{
 				"role":    role,
 				"content": contentStr,
@@ -253,6 +284,10 @@ func rewriteMessages(raw json.RawMessage) (json.RawMessage, bool) {
 					if v, ok := b["tool_call_id"]; ok {
 						_ = json.Unmarshal(v, &toolUseID)
 					}
+				}
+				// Skip tool_result blocks with no valid ID - upstream will reject them
+				if toolUseID == "" {
+					continue
 				}
 				content := extractToolResultText(b)
 				toolResults = append(toolResults, map[string]interface{}{

@@ -19,6 +19,8 @@ import (
 
 	"github.com/xywf221/opencode-proxy-api/config"
 	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
+	"github.com/xywf221/opencode-proxy-api/internal/retry"
+	"github.com/xywf221/opencode-proxy-api/internal/session"
 	"github.com/xywf221/opencode-proxy-api/internal/translate"
 )
 
@@ -172,6 +174,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body.Close()
 
+	// Extract session identifiers for request fingerprinting and proxy affinity
+	sessionIDs := session.ExtractFromRequest(r, bodyBytes)
+	log = log.With("session", sessionIDs.Session, "request_id", sessionIDs.Request)
+
 	model, isStream := parseRequestMeta(bodyBytes)
 
 	if model == "" {
@@ -194,7 +200,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		forwardBody = translate.NormalizeChatCompletionRequest(forwardBody)
 	}
 	if ep.adaptClaudeTools {
-		forwardBody = translate.ClaudeRequestToUpstream(bodyBytes)
+		forwardBody = translate.ClaudeRequestToUpstream(forwardBody)
 	}
 	if ep.needInject {
 		forwardBody = tryInjectReasoning(model, forwardBody)
@@ -206,30 +212,96 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	trace := &connTrace{}
 	upstreamCtx := httptrace.WithClientTrace(r.Context(), trace.clientTrace())
 
-	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
-	if err != nil {
-		log.Error("failed to create upstream request", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create upstream request", "server_error")
-		return
+	// newReq builds a fresh upstream request. The body must be re-read each
+	// attempt: bytes.NewReader consumes its buffer.
+	newReq := func() (*http.Request, error) {
+		upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
+		if err != nil {
+			return nil, err
+		}
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		upstreamReq.Header.Set("Authorization", "Bearer "+h.cfg.UpstreamToken)
+		upstreamReq.Header.Set("x-opencode-client", "desktop")
+		upstreamReq.Header.Set("User-Agent", session.OpencodeUserAgent())
+		upstreamReq.Header.Set("Referer", "https://opencode.ai/")
+		upstreamReq.Header.Set("X-Title", "opencode")
+		upstreamReq.Header.Set("x-opencode-session", sessionIDs.Session)
+		upstreamReq.Header.Set("x-opencode-request", sessionIDs.Request)
+		upstreamReq.Header.Set("x-opencode-project", sessionIDs.Project)
+		// Forward Anthropic-compatible headers when present (used by /v1/messages clients).
+		if v := r.Header.Get("anthropic-version"); v != "" {
+			upstreamReq.Header.Set("anthropic-version", v)
+		}
+		if v := r.Header.Get("x-api-key"); v != "" {
+			upstreamReq.Header.Set("x-api-key", v)
+		}
+		return upstreamReq, nil
 	}
 
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Authorization", "Bearer "+h.cfg.UpstreamToken)
-	upstreamReq.Header.Set("x-opencode-client", "desktop")
-	// Forward Anthropic-compatible headers when present (used by /v1/messages clients).
-	if v := r.Header.Get("anthropic-version"); v != "" {
-		upstreamReq.Header.Set("anthropic-version", v)
-	}
-	if v := r.Header.Get("x-api-key"); v != "" {
-		upstreamReq.Header.Set("x-api-key", v)
+	// clientForSession returns the HTTP client for this session. When a proxy
+	// pool is configured this respects session affinity and skips unhealthy
+	// proxies; otherwise the direct upstream client is used.
+	clientForSession := func() (*http.Client, error) {
+		if h.proxyPool == nil {
+			return h.upstream, nil
+		}
+		h.poolMu.Lock()
+		defer h.poolMu.Unlock()
+		return h.proxyPool.ClientForSession(sessionIDs.Session)
 	}
 
-	resp, err := h.upstream.Do(upstreamReq)
-	if err != nil {
-		log.Error("upstream request failed",
-			append([]any{"error", err, "upstream", upstreamURL}, trace.logArgs()...)...)
-		writeJSONError(w, http.StatusBadGateway, "upstream request failed", "server_error")
-		return
+	// Retry transient network/proxy failures instead of immediately returning
+	// an error. A failed dial (e.g. SOCKS connection refused) is retried a few
+	// times with a short backoff; each attempt selects a fresh client so a bad
+	// proxy is skipped once marked unhealthy.
+	const maxAttempts = 3
+	var resp *http.Response
+	attempt := 0
+	for {
+		attempt++
+		upstreamReq, err := newReq()
+		if err != nil {
+			log.Error("failed to create upstream request", "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to create upstream request", "server_error")
+			return
+		}
+
+		client, err := clientForSession()
+		if err != nil {
+			log.Error("failed to get session client", "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "proxy configuration error", "server_error")
+			return
+		}
+
+		resp, err = client.Do(upstreamReq)
+		if err == nil {
+			break
+		}
+
+		// Mark the current proxy as failed (network error).
+		if h.proxyPool != nil {
+			h.poolMu.Lock()
+			currentProxy := h.proxyPool.Current()
+			h.proxyPool.MarkFailure(currentProxy, 0, true, "")
+			h.poolMu.Unlock()
+		}
+
+		if attempt >= maxAttempts {
+			log.Error("upstream request failed",
+				append([]any{"error", err, "upstream", upstreamURL, "attempts", attempt}, trace.logArgs()...)...)
+			writeJSONError(w, http.StatusBadGateway, "upstream request failed", "server_error")
+			return
+		}
+
+		// Short exponential backoff between attempts (200ms, 400ms).
+		backoff := retry.ExponentialBackoff(uint32(attempt), 200*time.Millisecond, 800*time.Millisecond)
+		log.Warn("upstream request failed, retrying",
+			"error", err, "attempt", attempt, "max_attempts", maxAttempts, "backoff", backoff)
+		select {
+		case <-time.After(backoff):
+		case <-r.Context().Done():
+			return
+		}
 	}
 	defer resp.Body.Close()
 
@@ -251,10 +323,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			log.Warn("upstream error", append(logArgs, "body", truncateBody(errBody))...)
+			logRejectedRequest(log, resp.StatusCode, forwardBody)
 
-			// Rotate proxy on 429 if pool is configured
-			if resp.StatusCode == http.StatusTooManyRequests && h.proxyPool != nil {
-				h.rotateProxy()
+			// Mark proxy failure with status code and retry-after
+			if h.proxyPool != nil {
+				h.poolMu.Lock()
+				currentProxy := h.proxyPool.Current()
+				retryAfter := resp.Header.Get("Retry-After")
+				h.proxyPool.MarkFailure(currentProxy, resp.StatusCode, false, retryAfter) // HTTP error
+				h.poolMu.Unlock()
+
+				// Rotate on 429 to distribute load
+				if resp.StatusCode == http.StatusTooManyRequests {
+					h.rotateProxy()
+				}
 			}
 
 			forwardHeaders(w, resp)
@@ -266,6 +348,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Info("upstream", logArgs...)
+
+		// Mark proxy success for health tracking
+		if h.proxyPool != nil {
+			h.poolMu.Lock()
+			currentProxy := h.proxyPool.Current()
+			h.proxyPool.MarkSuccess(currentProxy)
+			h.poolMu.Unlock()
+		}
+
 		forwardHeaders(w, resp)
 		if w.Header().Get("Content-Type") == "" {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -293,13 +384,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logArgs := append([]any{"status", resp.StatusCode, "duration", elapsed.String()}, trace.logArgs()...)
 	if resp.StatusCode >= 400 {
 		log.Warn("upstream error", append(logArgs, "body", truncateBody(out))...)
+		logRejectedRequest(log, resp.StatusCode, forwardBody)
 
-		// Rotate proxy on 429 if pool is configured
-		if resp.StatusCode == http.StatusTooManyRequests && h.proxyPool != nil {
-			h.rotateProxy()
+		// Mark proxy failure with status code and retry-after
+		if h.proxyPool != nil {
+			h.poolMu.Lock()
+			currentProxy := h.proxyPool.Current()
+			retryAfter := resp.Header.Get("Retry-After")
+			h.proxyPool.MarkFailure(currentProxy, resp.StatusCode, false, retryAfter) // HTTP error
+			h.poolMu.Unlock()
+
+			// Rotate on 429 to distribute load
+			if resp.StatusCode == http.StatusTooManyRequests {
+				h.rotateProxy()
+			}
 		}
 	} else {
 		log.Info("upstream", logArgs...)
+
+		// Mark proxy success for health tracking
+		if h.proxyPool != nil {
+			h.poolMu.Lock()
+			currentProxy := h.proxyPool.Current()
+			h.proxyPool.MarkSuccess(currentProxy)
+			h.poolMu.Unlock()
+		}
 	}
 	forwardHeaders(w, resp)
 	if isStream && w.Header().Get("Content-Type") == "" {
@@ -496,6 +605,24 @@ func truncateBody(b []byte) string {
 		cut = cut[:len(cut)-1]
 	}
 	return cut + "...(truncated)"
+}
+
+// logRejectedRequest dumps the request body that upstream rejected with a 4xx
+// status, so schema/validation failures are diagnosable from the log alone.
+// It also reports whether the body is valid JSON.
+func logRejectedRequest(log *slog.Logger, status int, body []byte) {
+	if status < 400 || status >= 500 {
+		return // only validation-type rejections
+	}
+	var validJSON bool
+	if json.Valid(body) {
+		validJSON = true
+	}
+	log.Warn("request rejected by upstream",
+		"status", status,
+		"valid_json", validJSON,
+		"request_body", truncateBody(body),
+	)
 }
 
 const maxUpstreamBodySize = 50 << 20 // 50 MB

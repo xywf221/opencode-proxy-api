@@ -163,3 +163,91 @@ func TestNormalizeChatCompletionRequest_PreservesOtherFields(t *testing.T) {
 		t.Errorf("stream field not preserved")
 	}
 }
+
+func TestNormalizeChatCompletionRequest_GenerateToolCallID(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		expectedCount int
+		checkGenerated bool
+	}{
+		{
+			name: "generate ID for empty tool_call_id",
+			input: `{
+				"model": "gpt-4",
+				"messages": [
+					{"role": "user", "content": "test"},
+					{"role": "tool", "content": "result", "tool_call_id": ""}
+				]
+			}`,
+			expectedCount: 2,
+			checkGenerated: true,
+		},
+		{
+			name: "generate ID for missing tool_call_id field",
+			input: `{
+				"model": "gpt-4",
+				"messages": [
+					{"role": "user", "content": "test"},
+					{"role": "tool", "content": "result"}
+				]
+			}`,
+			expectedCount: 2,
+			checkGenerated: true,
+		},
+		{
+			name: "keep existing tool_call_id",
+			input: `{
+				"model": "gpt-4",
+				"messages": [
+					{"role": "user", "content": "test"},
+					{"role": "tool", "content": "result", "tool_call_id": "call_123"}
+				]
+			}`,
+			expectedCount: 2,
+			checkGenerated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := NormalizeChatCompletionRequest([]byte(tt.input))
+
+			var result map[string]interface{}
+			if err := json.Unmarshal(out, &result); err != nil {
+				t.Fatalf("Failed to unmarshal result: %v", err)
+			}
+
+			messages := result["messages"].([]interface{})
+			if len(messages) != tt.expectedCount {
+				t.Errorf("Expected %d messages, got %d", tt.expectedCount, len(messages))
+			}
+
+			// Find the tool message
+			var toolMsg map[string]interface{}
+			for _, msg := range messages {
+				m := msg.(map[string]interface{})
+				if m["role"] == "tool" {
+					toolMsg = m
+					break
+				}
+			}
+
+			if toolMsg == nil {
+				t.Fatal("Tool message not found")
+			}
+
+			toolCallID, ok := toolMsg["tool_call_id"].(string)
+			if !ok || toolCallID == "" {
+				t.Errorf("tool_call_id missing or empty: %v", toolMsg)
+			}
+
+			if tt.checkGenerated {
+				// Should start with "call_"
+				if len(toolCallID) < 6 || toolCallID[:5] != "call_" {
+					t.Errorf("Generated tool_call_id should start with 'call_', got: %s", toolCallID)
+				}
+			}
+		})
+	}
+}

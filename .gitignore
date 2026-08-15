@@ -3,7 +3,11 @@ opencode-proxy.exe
 opencode-proxy-api-linux-*
 opencode-proxy-api-darwin-*
 opencode-proxy-api-windows-*
+opencode-proxy-*.exe
 /dist/
 .env
 node_modules/
 *.tmp
+*.test
+*.out
+.DS_Store

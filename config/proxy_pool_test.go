@@ -161,3 +161,35 @@ func TestLoadProxyPoolInlineSingleEmpty(t *testing.T) {
 		t.Error("expected nil pool for empty inline proxy")
 	}
 }
+
+func TestInlineSingleProxyClientForSession(t *testing.T) {
+	// Regression: the inline single-proxy path failed to initialize
+	// cooldownUntil, so ClientForSession panicked with "index out of range"
+	// on p.cooldownUntil[0]. Must not panic.
+	pool, err := LoadProxyPool("<inline-single-proxy>", 5*time.Minute, false, "http://single-proxy:8080")
+	if err != nil {
+		t.Fatalf("LoadProxyPool inline failed: %v", err)
+	}
+	if pool == nil {
+		t.Fatal("expected non-nil pool for inline proxy")
+	}
+
+	client, err := pool.ClientForSession("sess_test_abc")
+	if err != nil {
+		t.Fatalf("ClientForSession failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+
+	// Exercise fallback loop and MarkFailure/MarkSuccess too.
+	pool.MarkFailure("http://single-proxy:8080", 0, true, "")
+	client, err = pool.ClientForSession("sess_test_abc")
+	if err != nil {
+		t.Fatalf("ClientForSession after failure failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client after failure")
+	}
+	pool.MarkSuccess("http://single-proxy:8080")
+}
