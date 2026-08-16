@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -41,6 +42,11 @@ type Config struct {
 	// Has no effect on socks5h (remote resolve) or http/https proxies.
 	// Set via OPCODE_FORCE_IPV6=true.
 	ForceIPv6 bool
+
+	// DiagEgress enables probing each active proxy's public egress IP and
+	// logging it, so the operator can verify which address family a proxy
+	// actually exits through. Set via OPCODE_DIAG_EGRESS=true.
+	DiagEgress bool
 }
 
 func parseModelList(raw string) map[string]struct{} {
@@ -89,6 +95,7 @@ func Load() *Config {
 	proxyURL := strings.TrimSpace(os.Getenv("OPCODE_PROXY"))
 	proxyPoolFile := strings.TrimSpace(os.Getenv("OPCODE_PROXY_POOL_FILE"))
 	forceIPv6 := parseBool(os.Getenv("OPCODE_FORCE_IPV6"))
+	diagEgress := parseBool(os.Getenv("OPCODE_DIAG_EGRESS"))
 
 	// If single proxy is specified but no pool file, treat it as a single-entry pool
 	if proxyURL != "" && proxyPoolFile == "" {
@@ -117,6 +124,7 @@ func Load() *Config {
 		ProxyURL:        proxyURL,
 		ProxyPoolFile:   proxyPoolFile,
 		ForceIPv6:       forceIPv6,
+		DiagEgress:      diagEgress,
 	}
 }
 
@@ -194,6 +202,40 @@ func newHTTPClient(timeout time.Duration, proxyURL string, forceIPv6 bool) (*htt
 		Timeout:   timeout,
 		Transport: transport,
 	}, nil
+}
+
+// EgressIP returns the public egress address as seen from the remote side of
+// the given client (i.e. the proxy's exit IP). Used for diagnostics to confirm
+// which address family a proxy actually exits through. Returns "" on any error.
+func EgressIP(client *http.Client) string {
+	if client == nil {
+		return ""
+	}
+	// ifconfig.co returns the caller's public IP as plain text (IPv6 when
+	// reached over IPv6, IPv4 otherwise).
+	req, err := http.NewRequest(http.MethodGet, "https://ifconfig.co", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "text/plain")
+	req.Header.Set("User-Agent", "opencode-proxy-diagnostics")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 128))
+	if err != nil {
+		return ""
+	}
+	ip := strings.TrimSpace(string(b))
+	if ip == "" {
+		return ""
+	}
+	return ip
 }
 
 func newTransport(proxyURL string, forceIPv6 bool) (http.RoundTripper, error) {

@@ -75,6 +75,21 @@ export OPCODE_PROXY="socks5h://proxy.com:1080"
 
 **⚠️ 重要**: 使用 `socks5h://` 而不是 `socks5://` 避免 IPv6 兼容性问题。
 
+### 诊断: 检查代理出口 IP
+
+启用后，服务启动时会探测当前代理的真实出口地址并打日志；代理池轮询到新代理时也会探测。
+
+```bash
+export OPCODE_DIAG_EGRESS=true
+```
+
+日志示例:
+```
+INFO proxy egress proxy=socks5h://***:***@127.0.0.1:7891 egress=2a14:640:2:71d5:...
+```
+
+用它确认代理走的是 IPv4 还是 IPv6 出口。默认关闭。
+
 ### 代理池
 
 创建 `proxies.txt`:

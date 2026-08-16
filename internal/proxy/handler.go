@@ -90,11 +90,19 @@ func New(cfg *config.Config) (*Handler, error) {
 		}
 	}
 
-	return &Handler{
+	h := &Handler{
 		cfg:       cfg,
 		upstream:  client,
 		proxyPool: pool,
-	}, nil
+	}
+
+	// When diagnostics are enabled, probe and log the active proxy's egress
+	// address once on startup.
+	if cfg.DiagEgress {
+		h.logActiveEgress()
+	}
+
+	return h, nil
 }
 
 // reqLog builds a component+request-id logger from context.
@@ -488,16 +496,54 @@ func tryInjectReasoning(model string, body []byte) []byte {
 // Called when a 429 response is received and proxyPool is configured.
 func (h *Handler) rotateProxy() {
 	h.poolMu.Lock()
-	defer h.poolMu.Unlock()
-
 	newProxy := h.proxyPool.Rotate()
 	client, err := h.proxyPool.NewClient()
 	if err != nil {
+		h.poolMu.Unlock()
 		slog.With("component", "proxy").Error("failed to rotate proxy",
 			"proxy", config.RedactProxyURL(newProxy), "error", err)
 		return
 	}
 	h.upstream = client
+	h.poolMu.Unlock()
+
+	// Probe the new proxy's egress address when diagnostics are enabled.
+	h.logEgress(newProxy, client)
+}
+
+// logEgress probes and logs the public egress IP of the given proxy/client,
+// but only when OPCODE_DIAG_EGRESS is enabled. Silence on failure.
+func (h *Handler) logEgress(proxyURL string, client *http.Client) {
+	if client == nil || !h.cfg.DiagEgress {
+		return
+	}
+	ip := config.EgressIP(client)
+	slog.With("component", "proxy").Info("proxy egress",
+		"proxy", config.RedactProxyURL(proxyURL),
+		"egress", ip)
+}
+
+// logActiveEgress probes the currently active proxy's egress IP. If a proxy
+// pool is configured it uses the pool's current client; otherwise the direct
+// upstream client. Only logs when OPCODE_DIAG_EGRESS is enabled.
+func (h *Handler) logActiveEgress() {
+	if !h.cfg.DiagEgress {
+		return
+	}
+	if h.proxyPool != nil {
+		h.poolMu.Lock()
+		proxyURL := h.proxyPool.Current()
+		client, err := h.proxyPool.NewClient()
+		h.poolMu.Unlock()
+		if err != nil {
+			return
+		}
+		h.logEgress(proxyURL, client)
+		return
+	}
+	if h.upstream != nil {
+		h.logEgress("", h.upstream)
+	}
 }
 
 // connTrace captures the remote address of the TCP connection used for an

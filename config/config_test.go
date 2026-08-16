@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -102,12 +105,14 @@ func TestLoadEnvOverride(t *testing.T) {
 	os.Setenv("OPCODE_ALLOWED_MODELS", "a,b")
 	os.Setenv("OPCODE_UPSTREAM_TIMEOUT", "30s")
 	os.Setenv("OPCODE_PROXY", "socks5://127.0.0.1:1080")
+	os.Setenv("OPCODE_DIAG_EGRESS", "true")
 	defer func() {
 		os.Unsetenv("OPCODE_LISTEN")
 		os.Unsetenv("OPCODE_API_KEY")
 		os.Unsetenv("OPCODE_ALLOWED_MODELS")
 		os.Unsetenv("OPCODE_UPSTREAM_TIMEOUT")
 		os.Unsetenv("OPCODE_PROXY")
+		os.Unsetenv("OPCODE_DIAG_EGRESS")
 	}()
 
 	c := Load()
@@ -123,6 +128,40 @@ func TestLoadEnvOverride(t *testing.T) {
 	if c.ProxyURL != "socks5://127.0.0.1:1080" {
 		t.Errorf("ProxyURL = %q, want socks5://127.0.0.1:1080", c.ProxyURL)
 	}
+	if !c.DiagEgress {
+		t.Error("DiagEgress = false, want true")
+	}
+}
+
+func TestEgressIP(t *testing.T) {
+	// A local upstream that reports a fixed public IP.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "198.51.100.7")
+	}))
+	defer srv.Close()
+
+	// Point the diagnostic at the local server by overriding the URL via a
+	// client with a custom transport that rewrites ifconfig.co to the test host.
+	client := &http.Client{Transport: &rewriteTransport{target: srv.URL}}
+
+	got := EgressIP(client)
+	if got != "198.51.100.7" {
+		t.Errorf("EgressIP = %q, want 198.51.100.7", got)
+	}
+}
+
+type rewriteTransport struct {
+	target string
+}
+
+func (rt *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Rebuild a request against the test server.
+	r2, err := http.NewRequest(req.Method, rt.target, req.Body)
+	if err != nil {
+		return nil, err
+	}
+	r2.Header = req.Header.Clone()
+	return http.DefaultTransport.RoundTrip(r2)
 }
 
 func TestNewTransport(t *testing.T) {
