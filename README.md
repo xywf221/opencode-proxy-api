@@ -90,6 +90,21 @@ INFO proxy egress proxy=socks5h://***:***@127.0.0.1:7891 egress=2a14:640:2:71d5:
 
 用它确认代理走的是 IPv4 还是 IPv6 出口。默认关闭。
 
+### 429 限流后自动切换出口 (Warp)
+
+当上游连续返回 429 达到阈值时，自动执行一条外部命令——比如你用来手动切换 Warp 出口的命令：
+
+```bash
+# 连续 5 次 429 后执行切换 Warp 出口的命令（shell）
+export OPCODE_RATE_LIMIT_ACTION="switch-warp-exit.sh"
+export OPCODE_RATE_LIMIT_ACTION_THRESHOLD=5
+```
+
+- `OPCODE_RATE_LIMIT_ACTION` 是要执行的 shell 命令/脚本（为空则禁用）
+- `OPCODE_RATE_LIMIT_ACTION_THRESHOLD` 触发阈值，默认 3
+- 任意成功的上游响应都会重置计数器；代理池存在时 429 会先轮换代理
+- 执行完成后会打日志（含输出），失败也会打 ERROR 日志
+
 ### 代理池
 
 创建 `proxies.txt`:

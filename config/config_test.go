@@ -106,6 +106,8 @@ func TestLoadEnvOverride(t *testing.T) {
 	os.Setenv("OPCODE_UPSTREAM_TIMEOUT", "30s")
 	os.Setenv("OPCODE_PROXY", "socks5://127.0.0.1:1080")
 	os.Setenv("OPCODE_DIAG_EGRESS", "true")
+	os.Setenv("OPCODE_RATE_LIMIT_ACTION", "switch-warp")
+	os.Setenv("OPCODE_RATE_LIMIT_ACTION_THRESHOLD", "7")
 	defer func() {
 		os.Unsetenv("OPCODE_LISTEN")
 		os.Unsetenv("OPCODE_API_KEY")
@@ -113,6 +115,8 @@ func TestLoadEnvOverride(t *testing.T) {
 		os.Unsetenv("OPCODE_UPSTREAM_TIMEOUT")
 		os.Unsetenv("OPCODE_PROXY")
 		os.Unsetenv("OPCODE_DIAG_EGRESS")
+		os.Unsetenv("OPCODE_RATE_LIMIT_ACTION")
+		os.Unsetenv("OPCODE_RATE_LIMIT_ACTION_THRESHOLD")
 	}()
 
 	c := Load()
@@ -130,6 +134,29 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !c.DiagEgress {
 		t.Error("DiagEgress = false, want true")
+	}
+	if c.RateLimitAction != "switch-warp" {
+		t.Errorf("RateLimitAction = %q, want switch-warp", c.RateLimitAction)
+	}
+	if c.RateLimitActionThreshold != 7 {
+		t.Errorf("RateLimitActionThreshold = %d, want 7", c.RateLimitActionThreshold)
+	}
+}
+
+func TestLoadRateLimitDefaultThreshold(t *testing.T) {
+	os.Setenv("OPCODE_RATE_LIMIT_ACTION", "switch-warp")
+	os.Unsetenv("OPCODE_RATE_LIMIT_ACTION_THRESHOLD")
+	defer func() {
+		os.Unsetenv("OPCODE_RATE_LIMIT_ACTION")
+		os.Unsetenv("OPCODE_RATE_LIMIT_ACTION_THRESHOLD")
+	}()
+
+	c := Load()
+	if c.RateLimitAction != "switch-warp" {
+		t.Errorf("RateLimitAction = %q, want switch-warp", c.RateLimitAction)
+	}
+	if c.RateLimitActionThreshold != 3 {
+		t.Errorf("RateLimitActionThreshold = %d, want default 3", c.RateLimitActionThreshold)
 	}
 }
 

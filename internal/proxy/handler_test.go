@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -422,6 +425,104 @@ func TestStreamingErrorForwardedUnchanged(t *testing.T) {
 	// An error must not be mislabeled as a stream.
 	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
 		t.Errorf("Content-Type = %q, error should not be labeled as a stream", ct)
+	}
+}
+
+func TestRateLimitActionTriggeredAfterThreshold(t *testing.T) {
+	const errBody = `{"error":{"message":"rate limited"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(errBody))
+	}))
+	defer upstream.Close()
+
+	// The action appends a sentinel to a file.
+	marker := filepath.Join(t.TempDir(), "action-ran.marker")
+	action := fmt.Sprintf("echo ran > %s", marker)
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+	cfg.RateLimitAction = action
+	cfg.RateLimitActionThreshold = 3
+
+	h := mustNew(t, cfg)
+	body := `{"model":"deepseek-v4","messages":[{"role":"user","content":"hi"}]}`
+
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: status = %d, want 429", i, rec.Code)
+		}
+	}
+
+	// The marker must exist: the 5th request crossed the threshold of 3.
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("rate-limit action did not run (marker %s missing): %v", marker, err)
+	}
+}
+
+func TestRateLimitActionResetOnSuccess(t *testing.T) {
+	// Response mode toggled from outside the handler: fail 429 first, then we
+	// flip to success, then back to 429 to confirm the counter was reset.
+	fail := &atomic.Bool{}
+	fail.Store(true)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"limited"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	marker := filepath.Join(t.TempDir(), "action-ran.marker")
+	action := fmt.Sprintf("echo ran > %s", marker)
+
+	cfg := newTestConfig()
+	cfg.UpstreamBase = upstream.URL
+	cfg.RateLimitAction = action
+	cfg.RateLimitActionThreshold = 3
+
+	h := mustNew(t, cfg)
+	body := `{"model":"deepseek-v4","messages":[{"role":"user","content":"hi"}]}`
+	req := func(url string) int {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+
+	// 2 x 429 (counter=2, no action yet).
+	if got := req("/v1/chat/completions"); got != 429 {
+		t.Fatalf("expected 429, got %d", got)
+	}
+	if got := req("/v1/chat/completions"); got != 429 {
+		t.Fatalf("expected 429, got %d", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("action ran too early (counter=2 < threshold=3)")
+	}
+
+	// Interleave a success. It must reset the consecutive-429 counter.
+	fail.Store(false)
+	if got := req("/v1/chat/completions"); got != 200 {
+		t.Fatalf("expected 200, got %d", got)
+	}
+	fail.Store(true)
+
+	// 3 more 429s are required to trigger again (counter restarted at 0).
+	for i := 0; i < 3; i++ {
+		if got := req("/v1/chat/completions"); got != 429 {
+			t.Fatalf("expected 429, got %d", got)
+		}
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("rate-limit action did not run after crossing threshold post-reset: %v", err)
 	}
 }
 

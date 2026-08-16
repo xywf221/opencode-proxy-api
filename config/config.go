@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,18 @@ type Config struct {
 	// logging it, so the operator can verify which address family a proxy
 	// actually exits through. Set via OPCODE_DIAG_EGRESS=true.
 	DiagEgress bool
+
+	// RateLimitAction is a shell command run when the number of consecutive
+	// 429 "too many requests" responses reaches RateLimitActionThreshold. It
+	// lets an operator rotate an external egress (e.g. a Warp tunnel) when the
+	// upstream throttles the current exit. Empty disables. Set via
+	// OPCODE_RATE_LIMIT_ACTION.
+	RateLimitAction string
+
+	// RateLimitActionThreshold is how many consecutive 429 responses trigger
+	// RateLimitAction. Default 3 when RateLimitAction is set. Set via
+	// OPCODE_RATE_LIMIT_ACTION_THRESHOLD.
+	RateLimitActionThreshold int
 }
 
 func parseModelList(raw string) map[string]struct{} {
@@ -97,6 +110,17 @@ func Load() *Config {
 	forceIPv6 := parseBool(os.Getenv("OPCODE_FORCE_IPV6"))
 	diagEgress := parseBool(os.Getenv("OPCODE_DIAG_EGRESS"))
 
+	rateLimitAction := strings.TrimSpace(os.Getenv("OPCODE_RATE_LIMIT_ACTION"))
+	rateLimitThreshold := 3
+	if raw := strings.TrimSpace(os.Getenv("OPCODE_RATE_LIMIT_ACTION_THRESHOLD")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			rateLimitThreshold = n
+		} else {
+			slog.With("component", "config").Warn("invalid OPCODE_RATE_LIMIT_ACTION_THRESHOLD, using default",
+				"value", raw, "default", rateLimitThreshold)
+		}
+	}
+
 	// If single proxy is specified but no pool file, treat it as a single-entry pool
 	if proxyURL != "" && proxyPoolFile == "" {
 		proxyPoolFile = "<inline-single-proxy>"
@@ -125,6 +149,8 @@ func Load() *Config {
 		ProxyPoolFile:   proxyPoolFile,
 		ForceIPv6:       forceIPv6,
 		DiagEgress:      diagEgress,
+		RateLimitAction: rateLimitAction,
+		RateLimitActionThreshold: rateLimitThreshold,
 	}
 }
 

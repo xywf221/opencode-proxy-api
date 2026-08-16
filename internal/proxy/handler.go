@@ -11,9 +11,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"os/exec"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -62,6 +65,11 @@ type Handler struct {
 	// When non-nil, 429 responses trigger rotation via RotateProxy().
 	proxyPool *config.ProxyPool
 	poolMu    sync.Mutex // Protects upstream client during rotation
+
+	// rateLimitCount tracks consecutive 429 responses. When it reaches
+	// cfg.RateLimitActionThreshold, cfg.RateLimitAction is executed and the
+	// count resets. Reset to 0 on any successful response.
+	rateLimitCount atomic.Int32
 }
 
 func New(cfg *config.Config) (*Handler, error) {
@@ -340,11 +348,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				retryAfter := resp.Header.Get("Retry-After")
 				h.proxyPool.MarkFailure(currentProxy, resp.StatusCode, false, retryAfter) // HTTP error
 				h.poolMu.Unlock()
+			}
 
-				// Rotate on 429 to distribute load
-				if resp.StatusCode == http.StatusTooManyRequests {
-					h.rotateProxy()
-				}
+			// Rotate on 429 to distribute load; when the rate-limit
+			// threshold is reached, run the external egress action.
+			// Runs independently of proxyPool so a Warp-style egress action
+			// works even without a configured pool.
+			if resp.StatusCode == http.StatusTooManyRequests {
+				h.onRateLimited()
 			}
 
 			forwardHeaders(w, resp)
@@ -356,6 +367,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Info("upstream", logArgs...)
+
+		// A successful response means the current egress is not being throttled:
+		// reset the consecutive-429 counter.
+		h.rateLimitCount.Store(0)
 
 		// Mark proxy success for health tracking
 		if h.proxyPool != nil {
@@ -401,14 +416,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			retryAfter := resp.Header.Get("Retry-After")
 			h.proxyPool.MarkFailure(currentProxy, resp.StatusCode, false, retryAfter) // HTTP error
 			h.poolMu.Unlock()
+		}
 
-			// Rotate on 429 to distribute load
-			if resp.StatusCode == http.StatusTooManyRequests {
-				h.rotateProxy()
-			}
+		// Rotate on 429 to distribute load; when the rate-limit
+		// threshold is reached, run the external egress action.
+		// Runs independently of proxyPool so a Warp-style egress action
+		// works even without a configured pool.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			h.onRateLimited()
 		}
 	} else {
 		log.Info("upstream", logArgs...)
+
+		// A successful response means the current egress is not being throttled:
+		// reset the consecutive-429 counter.
+		h.rateLimitCount.Store(0)
 
 		// Mark proxy success for health tracking
 		if h.proxyPool != nil {
@@ -496,19 +518,62 @@ func tryInjectReasoning(model string, body []byte) []byte {
 // Called when a 429 response is received and proxyPool is configured.
 func (h *Handler) rotateProxy() {
 	h.poolMu.Lock()
+	defer h.poolMu.Unlock()
+
 	newProxy := h.proxyPool.Rotate()
 	client, err := h.proxyPool.NewClient()
 	if err != nil {
-		h.poolMu.Unlock()
 		slog.With("component", "proxy").Error("failed to rotate proxy",
 			"proxy", config.RedactProxyURL(newProxy), "error", err)
 		return
 	}
 	h.upstream = client
-	h.poolMu.Unlock()
-
-	// Probe the new proxy's egress address when diagnostics are enabled.
 	h.logEgress(newProxy, client)
+}
+
+// onRateLimited is called on every 429 response. It rotates the proxy and, once
+// the consecutive 429 count reaches the configured threshold, runs the external
+// rate-limit action (e.g. switching a Warp egress) then resets the counter.
+func (h *Handler) onRateLimited() {
+	count := h.rateLimitCount.Add(1)
+
+	// Attempt proxy rotation when a pool is present.
+	if h.proxyPool != nil {
+		h.rotateProxy()
+	} else if h.cfg.RateLimitAction == "" {
+		return // nothing actionable
+	}
+
+	action := h.cfg.RateLimitAction
+	threshold := h.cfg.RateLimitActionThreshold
+	if action == "" || threshold <= 0 ||
+		count < int32(threshold) {
+		return
+	}
+
+	// Threshold reached: run the external command, then reset the counter.
+	h.rateLimitCount.Store(0)
+	slog.With("component", "proxy").Warn("running rate-limit action",
+		"429_count", count, "threshold", threshold, "action", action)
+
+	cmd := rateLimitCommand(action)
+	cmdOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.With("component", "proxy").Error("rate-limit action failed",
+			"action", action, "error", err, "output", strings.TrimSpace(string(cmdOutput)))
+		return
+	}
+	slog.With("component", "proxy").Info("rate-limit action completed",
+		"action", action, "output", strings.TrimSpace(string(cmdOutput)))
+}
+
+// rateLimitCommand wraps action in a platform-appropriate shell. Windows has
+// no /bin/sh; use cmd.exe there. On Unix, sh -c is expected.
+func rateLimitCommand(action string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C", action)
+	}
+	return exec.Command("sh", "-c", action)
 }
 
 // logEgress probes and logs the public egress IP of the given proxy/client,
