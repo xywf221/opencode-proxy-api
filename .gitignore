@@ -11,3 +11,6 @@ node_modules/
 *.test
 *.out
 .DS_Store
+
+# Claude Code worktrees
+.claude/worktrees/

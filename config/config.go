@@ -266,14 +266,16 @@ func EgressIP(client *http.Client) string {
 
 func newTransport(proxyURL string, forceIPv6 bool) (http.RoundTripper, error) {
 	if proxyURL == "" {
-		if !forceIPv6 {
-			return http.DefaultTransport, nil
-		}
-		// Direct connections: ask the resolver for IPv6 only.
+		// Direct connections (no proxy). Clone DefaultTransport so the pool
+		// limits can be raised without mutating the process-global singleton.
 		t := http.DefaultTransport.(*http.Transport).Clone()
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return d.DialContext(ctx, "tcp6", addr)
+		tuneTransport(t)
+		if forceIPv6 {
+			// Ask the resolver for IPv6 only.
+			d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+			t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return d.DialContext(ctx, "tcp6", addr)
+			}
 		}
 		return t, nil
 	}
@@ -290,6 +292,7 @@ func newTransport(proxyURL string, forceIPv6 bool) (http.RoundTripper, error) {
 	switch scheme {
 	case "http", "https":
 		t := http.DefaultTransport.(*http.Transport).Clone()
+		tuneTransport(t)
 		t.Proxy = http.ProxyURL(u)
 		return t, nil
 
@@ -313,6 +316,7 @@ func newTransport(proxyURL string, forceIPv6 bool) (http.RoundTripper, error) {
 			dialer = &localResolveDialer{Dialer: base, forceIPv6: forceIPv6}
 		}
 		t := http.DefaultTransport.(*http.Transport).Clone()
+		tuneTransport(t)
 		t.Proxy = nil
 		t.DialContext = dialContextFromDialer(dialer)
 		return t, nil
@@ -320,6 +324,17 @@ func newTransport(proxyURL string, forceIPv6 bool) (http.RoundTripper, error) {
 	default:
 		return nil, fmt.Errorf("unsupported OPCODE_PROXY scheme %q (supported: http, https, socks5, socks5h)", u.Scheme)
 	}
+}
+
+// tuneTransport raises the connection-pool upper limits on a cloned transport
+// so a single upstream host can reuse more idle keep-alive connections. The
+// caller passes a transport that was already cloned off DefaultTransport (and
+// which is never shared), so no global state is mutated. Clients are reused
+// across requests and sessions, so a larger pool pays off directly.
+func tuneTransport(t *http.Transport) {
+	t.MaxIdleConnsPerHost = 64
+	t.MaxIdleConns = 256
+	t.IdleConnTimeout = 90 * time.Second
 }
 
 // localResolveDialer resolves the hostname locally before dialing through the

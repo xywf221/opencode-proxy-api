@@ -27,6 +27,13 @@ type ProxyPool struct {
 	failureCounts []atomic.Uint32 // Consecutive failures per proxy
 	cooldownUntil []atomic.Int64  // Unix nano timestamp when proxy can be retried
 
+	// clientCache holds one reusable *http.Client per proxy (index-aligned with
+	// proxies), so each proxy shares a single connection pool across requests
+	// and sessions instead of rebuilding transport on every request. Each entry
+	// is an atomic.Pointer to allow lock-free reads on the hot path. A nil entry
+	// means "not yet built" (or "invalidated") and is filled under p.mu.
+	clientCache []atomic.Pointer[http.Client]
+
 	// forceIPv6 is inherited from Config and passed to newHTTPClient.
 	forceIPv6 bool
 	timeout   time.Duration
@@ -59,6 +66,7 @@ func LoadProxyPool(filePath string, timeout time.Duration, forceIPv6 bool, inlin
 			healthy:       make([]atomic.Bool, 1),
 			failureCounts: make([]atomic.Uint32, 1),
 			cooldownUntil: make([]atomic.Int64, 1),
+			clientCache:   make([]atomic.Pointer[http.Client], 1),
 		}
 		pool.healthy[0].Store(true)
 		return pool, nil
@@ -104,6 +112,7 @@ func LoadProxyPool(filePath string, timeout time.Duration, forceIPv6 bool, inlin
 		healthy:       make([]atomic.Bool, len(proxies)),
 		failureCounts: make([]atomic.Uint32, len(proxies)),
 		cooldownUntil: make([]atomic.Int64, len(proxies)),
+		clientCache:   make([]atomic.Pointer[http.Client], len(proxies)),
 	}
 	// Initialize all proxies as healthy
 	for i := range pool.healthy {
@@ -164,7 +173,7 @@ func (p *ProxyPool) ClientForSession(sessionID string) (*http.Client, error) {
 
 	// Try preferred proxy first if healthy and not in cooldown
 	if p.healthy[preferredIndex].Load() && p.cooldownUntil[preferredIndex].Load() <= now {
-		return newHTTPClient(p.timeout, p.proxies[preferredIndex], p.forceIPv6)
+		return p.clientForIndex(preferredIndex)
 	}
 
 	// Fall back to first healthy proxy not in cooldown
@@ -175,7 +184,7 @@ func (p *ProxyPool) ClientForSession(sessionID string) (*http.Client, error) {
 				"session", sessionID,
 				"preferred", preferredIndex,
 				"fallback", idx)
-			return newHTTPClient(p.timeout, p.proxies[idx], p.forceIPv6)
+			return p.clientForIndex(idx)
 		}
 	}
 
@@ -183,7 +192,39 @@ func (p *ProxyPool) ClientForSession(sessionID string) (*http.Client, error) {
 	slog.Warn("all proxies unhealthy or in cooldown, using preferred",
 		"session", sessionID,
 		"index", preferredIndex)
-	return newHTTPClient(p.timeout, p.proxies[preferredIndex], p.forceIPv6)
+	return p.clientForIndex(preferredIndex)
+}
+
+// clientForIndex returns the cached *http.Client for proxies[idx], building
+// and caching it on first use. Reads are lock-free via atomic.Value; a build
+// takes p.mu to avoid a stampede, but the expensive newTransport work does not
+// hold the health-tracking lock path any longer than a single build.
+func (p *ProxyPool) clientForIndex(idx int) (*http.Client, error) {
+	if v := p.clientCache[idx].Load(); v != nil {
+		return v, nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Re-check after acquiring the lock (another goroutine may have populated it).
+	if v := p.clientCache[idx].Load(); v != nil {
+		return v, nil
+	}
+
+	c, err := newHTTPClient(p.timeout, p.proxies[idx], p.forceIPv6)
+	if err != nil {
+		return nil, err
+	}
+	p.clientCache[idx].Store(c)
+	return c, nil
+}
+
+// invalidateCache clears the cached client for proxy index idx. Called when a
+// proxy transitions unhealthy or is recovered, so the next request builds a
+// fresh transport. Caller must hold p.mu (MarkSuccess/MarkFailure already do).
+func (p *ProxyPool) invalidateCache(idx int) {
+	p.clientCache[idx].Store(nil)
 }
 
 // MarkSuccess resets the failure count and cooldown for a proxy.
@@ -199,6 +240,7 @@ func (p *ProxyPool) MarkSuccess(proxyURL string) {
 			p.failureCounts[i].Store(0)
 			p.cooldownUntil[i].Store(0)
 			wasHealthy := p.healthy[i].Swap(true)
+			p.invalidateCache(i)
 			if !wasHealthy {
 				slog.Info("proxy recovered",
 					"index", i,
@@ -261,7 +303,11 @@ func (p *ProxyPool) MarkFailure(proxyURL string, statusCode int, isNetworkError 
 						"cooldown", backoff,
 						"proxy", RedactProxyURL(proxyURL))
 				}
-			} else {
+			}
+			// A failure may poison keep-alive connections in the pool; drop the
+			// cached client so the next request builds a fresh transport.
+			p.invalidateCache(i)
+			if failures < 3 {
 				slog.Debug("proxy failure recorded",
 					"index", i,
 					"failures", failures,

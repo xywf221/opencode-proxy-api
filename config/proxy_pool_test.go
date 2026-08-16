@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"hash/fnv"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,6 +163,105 @@ func TestLoadProxyPoolInlineSingleEmpty(t *testing.T) {
 	if pool != nil {
 		t.Error("expected nil pool for empty inline proxy")
 	}
+}
+
+func TestClientForSessionCachesClient(t *testing.T) {
+	tmpDir := t.TempDir()
+	proxyFile := filepath.Join(tmpDir, "proxies.txt")
+	content := "http://p1:8080\nhttp://p2:8080\nhttp://p3:8080\n"
+	if err := os.WriteFile(proxyFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := LoadProxyPool(proxyFile, 5*time.Minute, false, "")
+	if err != nil {
+		t.Fatalf("LoadProxyPool failed: %v", err)
+	}
+
+	// First call builds and caches; second returns the same pointer.
+	c1, err := pool.ClientForSession("sess_alpha")
+	if err != nil {
+		t.Fatalf("first ClientForSession failed: %v", err)
+	}
+	// Identify which proxy index sess_alpha maps to by its URL.
+	alphaURL := clientProxyURL(c1)
+	idx := -1
+	for i, u := range pool.proxies {
+		if u == alphaURL {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("could not find proxy for session in pool: %q", alphaURL)
+	}
+
+	c2, err := pool.ClientForSession("sess_alpha")
+	if err != nil {
+		t.Fatalf("second ClientForSession failed: %v", err)
+	}
+	if c1 != c2 {
+		t.Error("expected ClientForSession to return the same cached client pointer when healthy")
+	}
+
+	// A different session that maps to the same proxy must reuse the client.
+	otherID := findSessionForIndex(pool, idx, "sess_alpha")
+	c3, err := pool.ClientForSession(otherID)
+	if err != nil {
+		t.Fatalf("ClientForSession for other session failed: %v", err)
+	}
+	if c3 != c1 {
+		t.Errorf("expected different session hitting same proxy (idx %d) to reuse the cached client; got distinct pointers", idx)
+	}
+
+	// MarkFailure invalidates the cache: a new call must build a fresh client.
+	pool.MarkFailure(alphaURL, 503, true, "")
+	c4, err := pool.ClientForSession("sess_alpha")
+	if err != nil {
+		t.Fatalf("ClientForSession after failure failed: %v", err)
+	}
+	if c4 == c1 {
+		t.Error("expected cached client to be invalidated after MarkFailure")
+	}
+}
+
+// clientProxyURL returns the proxy URL a client's transport is bound to,
+// or "" if it dials directly (no proxy).
+func clientProxyURL(c *http.Client) string {
+	if c == nil || c.Transport == nil {
+		return ""
+	}
+	t, ok := c.Transport.(*http.Transport)
+	if !ok || t.Proxy == nil {
+		return ""
+	}
+	u, _ := t.Proxy(nil)
+	if u == nil {
+		return ""
+	}
+	return u.String()
+}
+
+// preferredIndex returns the pool index ClientForSession would prefer for id.
+func preferredIndex(p *ProxyPool, id string) int {
+	h := fnv.New64a()
+	h.Write([]byte(id))
+	return int(h.Sum64() % uint64(len(p.proxies)))
+}
+
+// findSessionForIndex scans candidate IDs until it finds one whose preferred
+// proxy index matches targetIdx and whose ID differs from avoid.
+func findSessionForIndex(p *ProxyPool, targetIdx int, avoid string) string {
+	for i := 0; i < 100000; i++ {
+		id := fmt.Sprintf("sess_alias_%d", i)
+		if id == avoid {
+			continue
+		}
+		if preferredIndex(p, id) == targetIdx {
+			return id
+		}
+	}
+	return avoid
 }
 
 func TestInlineSingleProxyClientForSession(t *testing.T) {
