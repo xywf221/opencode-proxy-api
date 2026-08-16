@@ -25,6 +25,18 @@ func containsFold(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
+// ModelRequiresInjection reports whether model matches any injection rule. A
+// caller may use this as a fast pre-check to skip JSON unmarshalling (and its
+// double Unmarshal cost) for models that never receive reasoning_content.
+func ModelRequiresInjection(model string) bool {
+	for _, r := range modelRules {
+		if r.match(model) {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldInject checks if an assistant message needs a reasoning_content placeholder.
 func shouldInject(role string, rc interface{}, toolCalls interface{}, scope string) bool {
 	if role != "assistant" {

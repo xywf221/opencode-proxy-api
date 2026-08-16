@@ -428,6 +428,53 @@ func TestStreamingErrorForwardedUnchanged(t *testing.T) {
 	}
 }
 
+// TestStreamingNonStreamingEquivalence is a guard for the second-phase refactor
+// that unifies streaming and non-streaming upstream handling. For the same
+// upstream response (200, 429, or 500), a stream:true request and a non-stream
+// request must produce an identical status code and response body.
+func TestStreamingNonStreamingEquivalence(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		contentTyp string
+		body       string
+	}{
+		{"success", http.StatusOK, "application/json", `{"id":"123","choices":[{"message":{"role":"assistant","content":"ok"}}]}`},
+		{"rate_limited", http.StatusTooManyRequests, "application/json", `{"error":{"message":"rate limited","type":"rate_limit_error"}}`},
+		{"server_error", http.StatusInternalServerError, "application/json", `{"error":{"message":"boom","type":"server_error"}}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentTyp)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+
+			cfg := newTestConfig()
+			cfg.UpstreamBase = upstream.URL
+			h := mustNew(t, cfg)
+
+			for _, streaming := range []bool{true, false} {
+				payload := fmt.Sprintf(`{"model":"deepseek-v4","stream":%t,"messages":[{"role":"user","content":"hi"}]}`, streaming)
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+				h.ServeHTTP(rec, req)
+
+				gotBody := rec.Body.String()
+				if rec.Code != tc.status {
+					t.Errorf("stream=%t: status = %d, want %d; body=%s", streaming, rec.Code, tc.status, gotBody)
+				}
+				if gotBody != tc.body {
+					t.Errorf("stream=%t: body = %q, want %q", streaming, gotBody, tc.body)
+				}
+			}
+		})
+	}
+}
+
 func TestRateLimitActionTriggeredAfterThreshold(t *testing.T) {
 	const errBody = `{"error":{"message":"rate limited"}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

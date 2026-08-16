@@ -145,3 +145,24 @@ func TestInjectReasoningContent(t *testing.T) {
 		t.Error("original body should not be mutated")
 	}
 }
+
+func TestModelRequiresInjection(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"deepseek-v2", true},
+		{"DeepSeek-v2", true},
+		{"my-deepseek-model", true},
+		{"kimi-k2", true},
+		{"KIMI-k2", true},
+		{"gpt-4", false},
+		{"claude-3", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := ModelRequiresInjection(tc.model); got != tc.want {
+			t.Errorf("ModelRequiresInjection(%q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}

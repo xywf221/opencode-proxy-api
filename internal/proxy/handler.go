@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"os/exec"
@@ -18,7 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/xywf221/opencode-proxy-api/config"
 	"github.com/xywf221/opencode-proxy-api/internal/reasoning"
@@ -328,66 +326,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isStream && !ep.rewriteDSML {
 		logArgs := append([]any{"status", resp.StatusCode, "duration", elapsed.String()}, trace.logArgs()...)
 
-		// Error responses are small JSON, not a stream: buffer them so the
-		// upstream error type reaches the log, then forward unchanged.
-		if resp.StatusCode >= 400 {
-			errBody, readErr := readUpstreamBody(resp.Body)
-			if readErr != nil {
-				log.Error("failed to read upstream error response",
-					append(logArgs, "error", readErr)...)
-				writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
-				return
-			}
-			log.Warn("upstream error", append(logArgs, "body", truncateBody(errBody))...)
-			logRejectedRequest(log, resp.StatusCode, forwardBody)
-
-			// Mark proxy failure with status code and retry-after
-			if h.proxyPool != nil {
-				h.poolMu.Lock()
-				currentProxy := h.proxyPool.Current()
-				retryAfter := resp.Header.Get("Retry-After")
-				h.proxyPool.MarkFailure(currentProxy, resp.StatusCode, false, retryAfter) // HTTP error
-				h.poolMu.Unlock()
-			}
-
-			// Rotate on 429 to distribute load; when the rate-limit
-			// threshold is reached, run the external egress action.
-			// Runs independently of proxyPool so a Warp-style egress action
-			// works even without a configured pool.
-			if resp.StatusCode == http.StatusTooManyRequests {
-				h.onRateLimited()
-			}
-
-			forwardHeaders(w, resp)
-			w.WriteHeader(resp.StatusCode)
-			if _, err := w.Write(errBody); err != nil {
-				log.Debug("response write error", "error", err)
-			}
+		// Read the whole upstream body (whether a small JSON error or a stream)
+		// so the shared postUpstream path can account health, rotate on 429 and
+		// forward it. Streaming bodies are buffered before forwarding; the final
+		// bytes sent to the client are identical to the upstream's.
+		out, readErr := readUpstreamBody(resp.Body)
+		if readErr != nil {
+			log.Error("failed to read upstream error response",
+				append(logArgs, "error", readErr)...)
+			writeJSONError(w, http.StatusBadGateway, "upstream response error", "server_error")
 			return
 		}
 
-		log.Info("upstream", logArgs...)
-
-		// A successful response means the current egress is not being throttled:
-		// reset the consecutive-429 counter.
-		h.rateLimitCount.Store(0)
-
-		// Mark proxy success for health tracking
-		if h.proxyPool != nil {
-			h.poolMu.Lock()
-			currentProxy := h.proxyPool.Current()
-			h.proxyPool.MarkSuccess(currentProxy)
-			h.poolMu.Unlock()
-		}
-
-		forwardHeaders(w, resp)
-		if w.Header().Get("Content-Type") == "" {
-			w.Header().Set("Content-Type", "text/event-stream")
-		}
-		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			log.Debug("response write error", "error", err)
-		}
+		// The streaming early path labels a response a stream only on success;
+		// an error response (>=400) must not be mislabeled, mirroring the
+		// original success-only branch of this path.
+		h.postUpstream(w, log, resp, out, logArgs, forwardBody, resp.StatusCode < 400)
 		return
 	}
 
@@ -405,16 +359,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logArgs := append([]any{"status", resp.StatusCode, "duration", elapsed.String()}, trace.logArgs()...)
-	if resp.StatusCode >= 400 {
+
+	h.postUpstream(w, log, resp, out, logArgs, forwardBody, isStream)
+}
+
+// postUpstream is the shared tail for both the streaming and non-streaming
+// paths once the upstream body is in memory. Keeping them identical prevents
+// the two paths from drifting in observable behavior: logging, proxy-health
+// accounting (MarkFailure/MarkSuccess), Retry-After handling, rate-limit
+// rotation on 429, successful-response counter resets, header forwarding, and
+// the final write.
+//
+// out is the (possibly rewritten) upstream body; for an error status it is the
+// (small) JSON error payload, otherwise the response/stream body.
+//
+// labelStream controls whether a missing Content-Type defaults to
+// text/event-stream. It is true only for responses that should look like a
+// stream: the trailing path uses the request's stream flag, while the
+// streaming early path labels only successful (non-error) responses.
+func (h *Handler) postUpstream(w http.ResponseWriter, log *slog.Logger, resp *http.Response,
+	out []byte, logArgs []any, forwardBody []byte, labelStream bool) {
+
+	status := resp.StatusCode
+	if status >= 400 {
 		log.Warn("upstream error", append(logArgs, "body", truncateBody(out))...)
-		logRejectedRequest(log, resp.StatusCode, forwardBody)
+		logRejectedRequest(log, status, forwardBody)
 
 		// Mark proxy failure with status code and retry-after
 		if h.proxyPool != nil {
 			h.poolMu.Lock()
 			currentProxy := h.proxyPool.Current()
 			retryAfter := resp.Header.Get("Retry-After")
-			h.proxyPool.MarkFailure(currentProxy, resp.StatusCode, false, retryAfter) // HTTP error
+			h.proxyPool.MarkFailure(currentProxy, status, false, retryAfter) // HTTP error
 			h.poolMu.Unlock()
 		}
 
@@ -422,7 +398,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// threshold is reached, run the external egress action.
 		// Runs independently of proxyPool so a Warp-style egress action
 		// works even without a configured pool.
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if status == http.StatusTooManyRequests {
 			h.onRateLimited()
 		}
 	} else {
@@ -441,24 +417,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	forwardHeaders(w, resp)
-	if isStream && w.Header().Get("Content-Type") == "" {
+	if labelStream && w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "text/event-stream")
 	}
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(status)
 	if _, err := w.Write(out); err != nil {
 		log.Debug("response write error", "error", err)
 	}
-}
-
-func parseRequestMeta(body []byte) (model string, stream bool) {
-	var raw struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
-	}
-	if json.Unmarshal(body, &raw) == nil {
-		return raw.Model, raw.Stream
-	}
-	return "", false
 }
 
 func (h *Handler) checkAuth(r *http.Request) bool {
@@ -479,26 +444,13 @@ func (h *Handler) checkAuth(r *http.Request) bool {
 	return subtle.ConstantTimeCompare(expected, got) == 1
 }
 
-var allowedHeaders = map[string]bool{
-	"Content-Type":      true,
-	"Cache-Control":     true,
-	"Connection":        true,
-	"Transfer-Encoding": true,
-	"X-Request-Id":      true,
-}
-
-func forwardHeaders(w http.ResponseWriter, resp *http.Response) {
-	for k, vv := range resp.Header {
-		if !allowedHeaders[k] {
-			continue
-		}
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-}
-
 func tryInjectReasoning(model string, body []byte) []byte {
+	// Fast path: models that match no injection rule never get reasoning_content.
+	// Skipping the (double) Unmarshal here avoids paying JSON cost for every
+	// request to models that don't need it.
+	if !reasoning.ModelRequiresInjection(model) {
+		return body
+	}
 	var chatBody reasoning.ChatBody
 	if json.Unmarshal(body, &chatBody) != nil {
 		return body
@@ -609,163 +561,6 @@ func (h *Handler) logActiveEgress() {
 	if h.upstream != nil {
 		h.logEgress("", h.upstream)
 	}
-}
-
-// connTrace captures the remote address of the TCP connection used for an
-// upstream request. When OPCODE_PROXY is set this is the proxy's address, not
-// the upstream host: the proxy's own outbound hop is not observable from here.
-type connTrace struct {
-	mu sync.Mutex
-
-	// remoteAddr is the peer we connected to (upstream host, or the proxy).
-	remoteAddr string
-	// network is "tcp4" or "tcp6" as reported by the connection.
-	network string
-	// reused reports whether the connection came from the idle pool, in which
-	// case no fresh DNS or dial happened for this request.
-	reused bool
-	// dnsHost is the name looked up, and dnsAddrs the resolved candidates.
-	// Empty when the transport dialed without a DNS step (proxy, or cache hit).
-	dnsHost  string
-	dnsAddrs []string
-}
-
-// clientTrace returns a httptrace.ClientTrace that records connection details
-// into t. The returned trace is safe for the concurrent callbacks httptrace makes.
-func (t *connTrace) clientTrace() *httptrace.ClientTrace {
-	return &httptrace.ClientTrace{
-		DNSStart: func(info httptrace.DNSStartInfo) {
-			t.mu.Lock()
-			defer t.mu.Unlock()
-			t.dnsHost = info.Host
-		},
-		DNSDone: func(info httptrace.DNSDoneInfo) {
-			t.mu.Lock()
-			defer t.mu.Unlock()
-			t.dnsAddrs = make([]string, 0, len(info.Addrs))
-			for _, a := range info.Addrs {
-				t.dnsAddrs = append(t.dnsAddrs, a.IP.String())
-			}
-		},
-		GotConn: func(info httptrace.GotConnInfo) {
-			t.mu.Lock()
-			defer t.mu.Unlock()
-			t.reused = info.Reused
-			if info.Conn == nil {
-				return
-			}
-			if ra := info.Conn.RemoteAddr(); ra != nil {
-				t.remoteAddr = ra.String()
-				t.network = ra.Network()
-			}
-		},
-	}
-}
-
-// logArgs returns slog key/value pairs describing the connection. Keys are
-// omitted when the corresponding step did not happen.
-func (t *connTrace) logArgs() []any {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	args := make([]any, 0, 10)
-	if t.remoteAddr == "" {
-		return args
-	}
-	args = append(args, "remote_addr", t.remoteAddr)
-
-	// Prefer the address family of the actual peer IP over conn.Network(),
-	// which reports "tcp" for dual-stack listeners on most platforms.
-	if host, _, err := net.SplitHostPort(t.remoteAddr); err == nil {
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.To4() != nil {
-				args = append(args, "remote_family", "ipv4")
-			} else {
-				args = append(args, "remote_family", "ipv6")
-			}
-		}
-	} else if t.network != "" {
-		args = append(args, "remote_network", t.network)
-	}
-
-	if t.reused {
-		// No DNS or dial happened; remote_addr comes from the pooled conn.
-		args = append(args, "conn_reused", true)
-	}
-	if t.dnsHost != "" {
-		args = append(args, "dns_host", t.dnsHost)
-	}
-	if len(t.dnsAddrs) > 0 {
-		args = append(args, "dns_addrs", strings.Join(t.dnsAddrs, ","))
-	}
-	return args
-}
-
-// maxErrorBodyLog caps how much of a failed upstream body reaches the log.
-const maxErrorBodyLog = 512
-
-// truncateBody trims b to a rune-safe prefix suitable for logging.
-func truncateBody(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	if len(s) <= maxErrorBodyLog {
-		return s
-	}
-	cut := s[:maxErrorBodyLog]
-	// Avoid emitting a partial multi-byte rune at the cut point.
-	for len(cut) > 0 && !utf8.ValidString(cut) {
-		cut = cut[:len(cut)-1]
-	}
-	return cut + "...(truncated)"
-}
-
-// logRejectedRequest dumps the request body that upstream rejected with a 4xx
-// status, so schema/validation failures are diagnosable from the log alone.
-// It also reports whether the body is valid JSON.
-func logRejectedRequest(log *slog.Logger, status int, body []byte) {
-	if status < 400 || status >= 500 {
-		return // only validation-type rejections
-	}
-	var validJSON bool
-	if json.Valid(body) {
-		validJSON = true
-	}
-	log.Warn("request rejected by upstream",
-		"status", status,
-		"valid_json", validJSON,
-		"request_body", truncateBody(body),
-	)
-}
-
-const maxUpstreamBodySize = 50 << 20 // 50 MB
-
-// readUpstreamBody reads the upstream response body, limiting to maxUpstreamBodySize.
-func readUpstreamBody(body io.ReadCloser) ([]byte, error) {
-	limited := io.LimitReader(body, maxUpstreamBodySize+1)
-	out, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(out)) > maxUpstreamBodySize {
-		return nil, fmt.Errorf("upstream response exceeds %d bytes", maxUpstreamBodySize)
-	}
-	return out, nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.With("component", "proxy").Error("write json error", "error", err)
-	}
-}
-
-func writeJSONError(w http.ResponseWriter, status int, message, errType string) {
-	writeJSON(w, status, map[string]interface{}{
-		"error": map[string]string{
-			"message": message,
-			"type":    errType,
-		},
-	})
 }
 
 func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
